@@ -17,10 +17,7 @@ from homeassistant.components.bluetooth.active_update_coordinator import (
 )
 from homeassistant.core import HomeAssistant, callback
 
-from .const import POLL_INTERVAL
-
-MAX_RETRIES = 3
-RETRY_DELAY = 5  # seconds between retries
+from .const import DOMAIN, POLL_INTERVAL
 from .shelly_ble import (
     BTHomeData,
     ShellyBluTrvBleClient,
@@ -31,7 +28,14 @@ from .shelly_ble import (
 
 _LOGGER = logging.getLogger(__name__)
 
+MAX_RETRIES = 3
+RETRY_DELAY = 10  # seconds between retries
 DEVICE_STARTUP_TIMEOUT = 300
+
+# Global lock to serialize BLE connections across all TRV instances.
+# Only one TRV should connect through the BT proxy at a time to avoid
+# overwhelming the ESP32 proxy's limited connection capacity.
+_global_ble_lock = asyncio.Lock()
 
 
 class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
@@ -99,8 +103,10 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         last_error = None
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                await self._client.connect()
-                status = await self._client.async_get_status()
+                async with _global_ble_lock:
+                    await self._client.connect()
+                    status = await self._client.async_get_status()
+                    await self._client.disconnect()
 
                 # Merge new values into existing status, preserving previous
                 # values for any fields that came back as None
@@ -142,7 +148,6 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                     self.device_name,
                     err,
                 )
-            finally:
                 try:
                     await self._client.disconnect()
                 except Exception:
@@ -202,12 +207,20 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         method: str,
         params: dict[str, Any] | None = None,
     ) -> Any:
-        """Execute an RPC command with retries (connect, send, disconnect)."""
+        """Execute an RPC command with retries (connect, send, disconnect).
+
+        Uses a global lock to serialize BLE connections across all TRV
+        instances, preventing the BT proxy from being overwhelmed.
+        Connection failures are logged but not raised for non-critical
+        commands to avoid crashing the websocket API.
+        """
         last_error = None
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                await self._client.connect()
-                result = await self._client.async_rpc_call(method, params)
+                async with _global_ble_lock:
+                    await self._client.connect()
+                    result = await self._client.async_rpc_call(method, params)
+                    await self._client.disconnect()
                 return result
             except Exception as err:
                 last_error = err
@@ -219,7 +232,6 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                     self.device_name,
                     err,
                 )
-            finally:
                 try:
                     await self._client.disconnect()
                 except Exception:
@@ -228,11 +240,11 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
 
-        _LOGGER.error(
+        _LOGGER.warning(
             "RPC %s failed for %s after %d attempts: %s",
             method,
             self.device_name,
             MAX_RETRIES,
             last_error,
         )
-        raise last_error
+        return None
