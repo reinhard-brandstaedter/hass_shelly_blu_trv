@@ -227,9 +227,6 @@ class ShellyBluTrvBleClient:
         self._address = address
         self._client: BleakClient | None = None
         self._lock = asyncio.Lock()
-        self._response_event = asyncio.Event()
-        self._response_length: int = 0
-        self._response_data: bytearray = bytearray()
         self._connected = False
         self._mtu: int = 20  # Conservative default, will negotiate higher
 
@@ -278,13 +275,6 @@ class ShellyBluTrvBleClient:
                 self._connected = False
                 self._client = None
 
-    async def _rx_notification_handler(self, _sender: Any, data: bytearray) -> None:
-        """Handle RX control notifications (response length)."""
-        if len(data) >= 4:
-            self._response_length = struct.unpack(">I", data[:4])[0]
-            _LOGGER.debug("RX control: response length = %d", self._response_length)
-            self._response_event.set()
-
     async def async_rpc_call(
         self,
         method: str,
@@ -296,9 +286,12 @@ class ShellyBluTrvBleClient:
         Protocol:
         1. Write payload length (4-byte big-endian) to TX control characteristic
         2. Write JSON payload (chunked to MTU) to data characteristic
-        3. Wait for RX control notification with response length
+        3. Poll RX control characteristic until response length is available
         4. Read response from data characteristic in chunks
         5. Parse and return JSON response
+
+        Uses polling instead of notifications for RX control, as BLE
+        notifications are unreliable through ESPHome BT proxies.
         """
         async with self._lock:
             if not self._client or not self._connected:
@@ -323,79 +316,79 @@ class ShellyBluTrvBleClient:
                 payload_length,
             )
 
-            # Reset response state
-            self._response_event.clear()
-            self._response_length = 0
-            self._response_data = bytearray()
-
-            # Subscribe to RX control notifications
-            await self._client.start_notify(
-                SHELLY_RPC_RX_CTL_UUID, self._rx_notification_handler
+            # Step 1: Write payload length to TX control
+            length_bytes = struct.pack(">I", payload_length)
+            await self._client.write_gatt_char(
+                SHELLY_RPC_TX_CTL_UUID, length_bytes, response=True
             )
 
-            try:
-                # Step 1: Write payload length to TX control
-                length_bytes = struct.pack(">I", payload_length)
+            # Step 2: Write payload to data characteristic (chunked)
+            offset = 0
+            while offset < payload_length:
+                chunk_size = min(self._mtu, payload_length - offset)
+                chunk = payload[offset : offset + chunk_size]
                 await self._client.write_gatt_char(
-                    SHELLY_RPC_TX_CTL_UUID, length_bytes, response=True
+                    SHELLY_RPC_DATA_UUID, chunk, response=True
                 )
+                offset += chunk_size
 
-                # Step 2: Write payload to data characteristic (chunked)
-                offset = 0
-                while offset < payload_length:
-                    chunk_size = min(self._mtu, payload_length - offset)
-                    chunk = payload[offset : offset + chunk_size]
-                    await self._client.write_gatt_char(
-                        SHELLY_RPC_DATA_UUID, chunk, response=True
-                    )
-                    offset += chunk_size
+            # Step 3: Poll RX control for response length
+            response_length = 0
+            poll_interval = 0.5  # seconds between polls
+            elapsed = 0.0
 
-                # Step 3: Wait for RX control notification
+            while elapsed < timeout:
+                await asyncio.sleep(poll_interval)
+                elapsed += poll_interval
+
                 try:
-                    await asyncio.wait_for(
-                        self._response_event.wait(), timeout=timeout
+                    rx_data = await self._client.read_gatt_char(
+                        SHELLY_RPC_RX_CTL_UUID
                     )
-                except asyncio.TimeoutError:
-                    _LOGGER.error(
-                        "Timeout waiting for RPC response from %s for %s",
-                        self._address,
-                        method,
-                    )
-                    return None
+                    if rx_data and len(rx_data) >= 4:
+                        response_length = struct.unpack(">I", rx_data[:4])[0]
+                        if response_length > 0:
+                            _LOGGER.debug(
+                                "RX control: response length = %d (after %.1fs)",
+                                response_length,
+                                elapsed,
+                            )
+                            break
+                except Exception as err:
+                    _LOGGER.debug("Error reading RX control: %s", err)
 
-                # Step 4: Read response from data characteristic
-                if self._response_length > 0:
-                    bytes_read = 0
-                    while bytes_read < self._response_length:
-                        chunk = await self._client.read_gatt_char(SHELLY_RPC_DATA_UUID)
-                        self._response_data.extend(chunk)
-                        bytes_read += len(chunk)
-
-                    # Step 5: Parse JSON response
-                    response_text = self._response_data[
-                        : self._response_length
-                    ].decode("utf-8")
-                    _LOGGER.debug("RPC response: %s", response_text)
-
-                    response = json.loads(response_text)
-
-                    if "error" in response:
-                        _LOGGER.error(
-                            "RPC error from %s: %s",
-                            self._address,
-                            response["error"],
-                        )
-                        return None
-
-                    return response.get("result")
-
+            if response_length == 0:
+                _LOGGER.error(
+                    "Timeout waiting for RPC response from %s for %s (%.1fs)",
+                    self._address,
+                    method,
+                    elapsed,
+                )
                 return None
 
-            finally:
-                try:
-                    await self._client.stop_notify(SHELLY_RPC_RX_CTL_UUID)
-                except Exception:
-                    pass
+            # Step 4: Read response from data characteristic
+            response_data = bytearray()
+            bytes_read = 0
+            while bytes_read < response_length:
+                chunk = await self._client.read_gatt_char(SHELLY_RPC_DATA_UUID)
+                response_data.extend(chunk)
+                bytes_read += len(chunk)
+
+            # Step 5: Parse JSON response
+            response_text = response_data[:response_length].decode("utf-8")
+            _LOGGER.debug("RPC response: %s", response_text)
+
+            response = json.loads(response_text)
+
+            if "error" in response:
+                _LOGGER.error(
+                    "RPC error from %s: %s",
+                    self._address,
+                    response["error"],
+                )
+                return None
+
+            return response.get("result")
 
     # --- High-level TRV commands ---
 
