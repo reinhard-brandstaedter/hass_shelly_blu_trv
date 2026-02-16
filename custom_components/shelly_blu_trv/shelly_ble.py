@@ -171,7 +171,7 @@ def parse_bthome_advertisement(
             # sint16, scale factor 0.01 (BTHome v2)
             if pos + 1 < len(raw):
                 raw_temp = struct.unpack_from("<h", raw, pos)[0]
-                temp = raw_temp / 100.0
+                temp = raw_temp / 10.0
                 pos += 2
 
                 # Temperatures appear in order: target, current, external
