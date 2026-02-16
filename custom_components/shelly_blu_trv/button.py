@@ -25,36 +25,17 @@ class ShellyBluTrvButtonDescription(ButtonEntityDescription):
 
 
 async def _calibrate(coordinator: ShellyBluTrvCoordinator) -> None:
-    try:
-        await coordinator.client.connect()
-        await coordinator.client.async_calibrate()
-    finally:
-        try:
-            await coordinator.client.disconnect()
-        except Exception:
-            pass
+    await coordinator.async_rpc_command("TRV.Calibrate", {"id": 0})
 
 
 async def _sync_time(coordinator: ShellyBluTrvCoordinator) -> None:
-    try:
-        await coordinator.client.connect()
-        await coordinator.client.async_set_time()
-    finally:
-        try:
-            await coordinator.client.disconnect()
-        except Exception:
-            pass
+    import time
+    utc_now = int(time.time())
+    await coordinator.async_rpc_command("Sys.SetTime", {"unixtime": utc_now, "tz": "UTC0"})
 
 
 async def _identify(coordinator: ShellyBluTrvCoordinator) -> None:
-    try:
-        await coordinator.client.connect()
-        await coordinator.client.async_show_message("HELLO")
-    finally:
-        try:
-            await coordinator.client.disconnect()
-        except Exception:
-            pass
+    await coordinator.async_rpc_command("Trv.ShowMessage", {"id": 0, "msg": "HELLO"})
 
 
 BUTTON_DESCRIPTIONS: list[ShellyBluTrvButtonDescription] = [

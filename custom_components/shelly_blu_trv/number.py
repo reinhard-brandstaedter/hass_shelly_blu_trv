@@ -64,14 +64,9 @@ class ShellyBluTrvExternalTemp(ShellyBluTrvEntity, NumberEntity):
             self.coordinator.device_name,
             value,
         )
-        try:
-            await self.coordinator.client.connect()
-            await self.coordinator.client.async_set_external_temperature(value)
-        finally:
-            try:
-                await self.coordinator.client.disconnect()
-            except Exception:
-                pass
+        await self.coordinator.async_rpc_command(
+            "TRV.SetExternalTemperature", {"id": 0, "t_C": value}
+        )
 
         self._attr_native_value = value
         self.async_write_ha_state()

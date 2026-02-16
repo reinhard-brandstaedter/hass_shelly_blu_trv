@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -16,7 +17,10 @@ from homeassistant.components.bluetooth.active_update_coordinator import (
 )
 from homeassistant.core import HomeAssistant, callback
 
-from .const import POLL_INTERVAL, SHELLY_MANUFACTURER_ID
+from .const import POLL_INTERVAL
+
+MAX_RETRIES = 3
+RETRY_DELAY = 5  # seconds between retries
 from .shelly_ble import (
     BTHomeData,
     ShellyBluTrvBleClient,
@@ -92,29 +96,67 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         self.ble_device = service_info.device
         self._client.set_ble_device(service_info.device)
 
-        try:
-            await self._client.connect()
-            status = await self._client.async_get_status()
-            self.state.status = status
-            self.state.last_rpc_poll = time.time()
-            _LOGGER.debug(
-                "Poll result for %s: target=%.1f, current=%.1f, pos=%s",
-                self.device_name,
-                status.target_C or 0,
-                status.current_C or 0,
-                status.pos,
-            )
-        except Exception:
-            _LOGGER.warning(
-                "Failed to poll %s",
-                self.device_name,
-                exc_info=True,
-            )
-        finally:
+        last_error = None
+        for attempt in range(1, MAX_RETRIES + 1):
             try:
-                await self._client.disconnect()
-            except Exception:
-                pass
+                await self._client.connect()
+                status = await self._client.async_get_status()
+
+                # Merge new values into existing status, preserving previous
+                # values for any fields that came back as None
+                old = self.state.status
+                if status.pos is not None:
+                    old.pos = status.pos
+                if status.current_C is not None:
+                    old.current_C = status.current_C
+                if status.target_C is not None:
+                    old.target_C = status.target_C
+                if status.steps is not None:
+                    old.steps = status.steps
+                old.not_calibrated = status.not_calibrated
+                old.not_mounted = status.not_mounted
+                old.battery_low = status.battery_low
+                old.ext_temp_missing = status.ext_temp_missing
+                old.boost_active = status.boost_active
+                old.boost_started_at = status.boost_started_at
+                old.boost_duration = status.boost_duration
+                old.override_active = status.override_active
+                old.override_started_at = status.override_started_at
+                old.override_duration = status.override_duration
+
+                self.state.last_rpc_poll = time.time()
+                _LOGGER.debug(
+                    "Poll result for %s: target=%.1f, current=%.1f, pos=%s",
+                    self.device_name,
+                    old.target_C or 0,
+                    old.current_C or 0,
+                    old.pos,
+                )
+                return  # Success
+            except Exception as err:
+                last_error = err
+                _LOGGER.debug(
+                    "Poll attempt %d/%d failed for %s: %s",
+                    attempt,
+                    MAX_RETRIES,
+                    self.device_name,
+                    err,
+                )
+            finally:
+                try:
+                    await self._client.disconnect()
+                except Exception:
+                    pass
+
+            if attempt < MAX_RETRIES:
+                await asyncio.sleep(RETRY_DELAY)
+
+        _LOGGER.warning(
+            "Failed to poll %s after %d attempts: %s",
+            self.device_name,
+            MAX_RETRIES,
+            last_error,
+        )
 
     @callback
     def _async_handle_bluetooth_event(
@@ -160,13 +202,37 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         method: str,
         params: dict[str, Any] | None = None,
     ) -> Any:
-        """Execute an RPC command (connect, send, disconnect)."""
-        try:
-            await self._client.connect()
-            result = await self._client.async_rpc_call(method, params)
-            return result
-        finally:
+        """Execute an RPC command with retries (connect, send, disconnect)."""
+        last_error = None
+        for attempt in range(1, MAX_RETRIES + 1):
             try:
-                await self._client.disconnect()
-            except Exception:
-                pass
+                await self._client.connect()
+                result = await self._client.async_rpc_call(method, params)
+                return result
+            except Exception as err:
+                last_error = err
+                _LOGGER.debug(
+                    "RPC %s attempt %d/%d failed for %s: %s",
+                    method,
+                    attempt,
+                    MAX_RETRIES,
+                    self.device_name,
+                    err,
+                )
+            finally:
+                try:
+                    await self._client.disconnect()
+                except Exception:
+                    pass
+
+            if attempt < MAX_RETRIES:
+                await asyncio.sleep(RETRY_DELAY)
+
+        _LOGGER.error(
+            "RPC %s failed for %s after %d attempts: %s",
+            method,
+            self.device_name,
+            MAX_RETRIES,
+            last_error,
+        )
+        raise last_error

@@ -116,14 +116,9 @@ class ShellyBluTrvClimate(ShellyBluTrvEntity, ClimateEntity):
             temperature,
         )
 
-        try:
-            await self.coordinator.client.connect()
-            await self.coordinator.client.async_set_target_temperature(temperature)
-        finally:
-            try:
-                await self.coordinator.client.disconnect()
-            except Exception:
-                pass
+        await self.coordinator.async_rpc_command(
+            "TRV.SetTarget", {"id": 0, "target_C": temperature}
+        )
 
         # Optimistically update state
         self.coordinator.state.bthome.target_temperature = temperature
@@ -133,23 +128,13 @@ class ShellyBluTrvClimate(ShellyBluTrvEntity, ClimateEntity):
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set HVAC mode."""
         if hvac_mode == HVACMode.HEAT:
-            try:
-                await self.coordinator.client.connect()
-                await self.coordinator.client.async_set_enable(True)
-            finally:
-                try:
-                    await self.coordinator.client.disconnect()
-                except Exception:
-                    pass
+            await self.coordinator.async_rpc_command(
+                "Trv.SetConfig", {"id": 0, "config": {"enable": True}}
+            )
         elif hvac_mode == HVACMode.OFF:
-            try:
-                await self.coordinator.client.connect()
-                await self.coordinator.client.async_set_enable(False)
-            finally:
-                try:
-                    await self.coordinator.client.disconnect()
-                except Exception:
-                    pass
+            await self.coordinator.async_rpc_command(
+                "Trv.SetConfig", {"id": 0, "config": {"enable": False}}
+            )
 
         self._attr_hvac_mode = hvac_mode
         self.async_write_ha_state()
@@ -157,25 +142,15 @@ class ShellyBluTrvClimate(ShellyBluTrvEntity, ClimateEntity):
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set preset mode."""
         if preset_mode == PRESET_BOOST:
-            try:
-                await self.coordinator.client.connect()
-                await self.coordinator.client.async_set_boost(DEFAULT_BOOST_DURATION)
-            finally:
-                try:
-                    await self.coordinator.client.disconnect()
-                except Exception:
-                    pass
+            await self.coordinator.async_rpc_command(
+                "TRV.SetBoost", {"id": 0, "duration": DEFAULT_BOOST_DURATION}
+            )
             self.coordinator.state.status.boost_active = True
         elif preset_mode == PRESET_NONE:
             if self.coordinator.state.status.boost_active:
-                try:
-                    await self.coordinator.client.connect()
-                    await self.coordinator.client.async_clear_boost()
-                finally:
-                    try:
-                        await self.coordinator.client.disconnect()
-                    except Exception:
-                        pass
+                await self.coordinator.async_rpc_command(
+                    "TRV.ClearBoost", {"id": 0}
+                )
             self.coordinator.state.status.boost_active = False
 
         self.async_write_ha_state()
