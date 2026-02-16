@@ -1,0 +1,18 @@
+{
+  "domain": "shelly_blu_trv",
+  "name": "Shelly BLU TRV",
+  "codeowners": ["@reinhard"],
+  "config_flow": true,
+  "dependencies": ["bluetooth_adapters"],
+  "documentation": "https://github.com/reinhard/hass_shelly_blu_trv",
+  "bluetooth": [
+    {
+      "manufacturer_id": 2985,
+      "manufacturer_data_start": []
+    }
+  ],
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/reinhard/hass_shelly_blu_trv/issues",
+  "requirements": ["bleak>=0.21.0", "bleak-retry-connector>=3.1.0"],
+  "version": "0.1.0"
+}

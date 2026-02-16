@@ -1,0 +1,82 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Shelly BLU TRV",
+        "description": "Select a discovered Shelly BLU TRV device or enter the MAC address manually.",
+        "data": {
+          "address": "Device",
+          "name": "Device name (optional)"
+        }
+      },
+      "bluetooth_confirm": {
+        "title": "Shelly BLU TRV Discovered",
+        "description": "Found Shelly BLU TRV: {name} ({address})",
+        "data": {
+          "name": "Device name"
+        }
+      },
+      "pair": {
+        "title": "Pair with Shelly BLU TRV",
+        "description": "To pair with **{name}** ({address}):\n\n1. On the TRV, turn the knob **4 steps clockwise** to enter pairing mode\n2. The LED will flash **blue** for 30 seconds\n3. Click **Submit** below while the LED is flashing\n\nNote: The TRV supports a maximum of 4 bonded devices."
+      }
+    },
+    "error": {
+      "device_not_found": "Device not found. Make sure a Bluetooth proxy is in range.",
+      "cannot_connect": "Could not connect to the device. Make sure it is in pairing mode and try again.",
+      "timeout": "Connection timed out. Make sure the device is in pairing mode and within range."
+    },
+    "abort": {
+      "already_configured": "This device is already configured."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "current_temperature": {
+        "name": "Current temperature"
+      },
+      "target_temperature": {
+        "name": "Target temperature"
+      },
+      "external_temperature": {
+        "name": "External temperature"
+      },
+      "valve_position": {
+        "name": "Valve position"
+      }
+    },
+    "binary_sensor": {
+      "battery_low": {
+        "name": "Battery low"
+      },
+      "not_calibrated": {
+        "name": "Not calibrated"
+      },
+      "not_mounted": {
+        "name": "Not mounted"
+      },
+      "boost_active": {
+        "name": "Boost active"
+      },
+      "override_active": {
+        "name": "Override active"
+      }
+    },
+    "button": {
+      "calibrate": {
+        "name": "Calibrate"
+      },
+      "sync_time": {
+        "name": "Sync time"
+      },
+      "identify": {
+        "name": "Identify"
+      }
+    },
+    "number": {
+      "external_temperature": {
+        "name": "External temperature"
+      }
+    }
+  }
+}
