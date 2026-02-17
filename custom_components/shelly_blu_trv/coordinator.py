@@ -11,6 +11,7 @@ from bleak.backends.device import BLEDevice
 from homeassistant.components.bluetooth import (
     BluetoothScannerDevice,
     BluetoothServiceInfoBleak,
+    async_ble_device_from_address,
 )
 from homeassistant.components.bluetooth.active_update_coordinator import (
     ActiveBluetoothDataUpdateCoordinator,
@@ -102,6 +103,11 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
 
         last_error = None
         for attempt in range(1, MAX_RETRIES + 1):
+            # Refresh BLE device on retry attempts (first attempt uses
+            # the device from service_info, retries get a fresh reference)
+            if attempt > 1:
+                self._refresh_ble_device()
+
             try:
                 async with _global_ble_lock:
                     await self._client.connect()
@@ -202,6 +208,20 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
 
         super()._async_handle_bluetooth_event(service_info, change)
 
+    def _refresh_ble_device(self) -> None:
+        """Fetch a fresh BLE device reference from HA's bluetooth stack.
+
+        This ensures we always connect through the best available proxy
+        with the most up-to-date connection info, rather than relying on
+        a potentially stale reference from a previous advertisement.
+        """
+        fresh = async_ble_device_from_address(
+            self.hass, self._client.address, connectable=True
+        )
+        if fresh:
+            self.ble_device = fresh
+            self._client.set_ble_device(fresh)
+
     async def async_rpc_command(
         self,
         method: str,
@@ -216,6 +236,9 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         """
         last_error = None
         for attempt in range(1, MAX_RETRIES + 1):
+            # Get fresh BLE device reference before each attempt
+            self._refresh_ble_device()
+
             try:
                 async with _global_ble_lock:
                     await self._client.connect()
