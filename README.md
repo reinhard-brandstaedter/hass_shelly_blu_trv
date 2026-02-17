@@ -18,7 +18,7 @@ A custom Home Assistant integration for **Shelly BLU TRV** (Thermostatic Radiato
 ## Requirements
 
 - Home Assistant 2024.1.0 or newer
-- At least one **ESPHome Bluetooth Proxy** in range of your TRV(s)
+- At least one **Bluetooth Proxy** in range of your TRV(s) (e.g. a ESPHome ESP32 bluetooth proxy)
   - Other Shelly devices (1PM Pro, Plus, etc.) only forward BTHome advertisements — they cannot proxy active BLE connections
   - HA's built-in Bluetooth adapter also works if the machine running HA has one
 
@@ -43,7 +43,7 @@ A custom Home Assistant integration for **Shelly BLU TRV** (Thermostatic Radiato
 
 Before adding the integration, you need to pair each TRV with your ESPHome Bluetooth Proxy:
 
-1. On the TRV, turn the knob **4 times clockwise** within 10 seconds to enter pairing mode (the display will show a Bluetooth icon)
+1. On the TRV, turn the knob **4 times clockwise/ccw back/forth** within 10 seconds to enter the menu and then turn the know to enter BLE pairing mode (the display will show "bLe" blinking)
 2. The TRV stays in pairing mode for ~30 seconds
 
 ### Adding a device
@@ -59,8 +59,8 @@ Before adding the integration, you need to pair each TRV with your ESPHome Bluet
 The TRV has a built-in temperature sensor, but it reads higher than actual room temperature due to proximity to the radiator. You can feed a more accurate room temperature from an external sensor using an automation:
 
 ```yaml
-alias: Push room temperature to TRVs
-description: Send SHT45 room temperature to TRVs every 5 minutes
+alias: Push room temperature to TRV
+description: Send room temperature to TRVs every 5 minutes
 triggers:
   - trigger: time_pattern
     minutes: /5
@@ -75,7 +75,6 @@ actions:
     target:
       entity_id:
         - number.shelly_blu_trv_wz1_external_temperature
-        - number.shelly_blu_trv_wz2_external_temperature
     data:
       value: "{{ states('sensor.tempsensor_wohnzimmer_temperature') | float }}"
 mode: single
@@ -100,7 +99,7 @@ RPC Commands (active, on-demand + 5min poll)
 
 If you see `BluetoothGATTErrorResponse: Unknown error (19)` in the logs, the BLE bond between the ESP32 proxy and the TRV has gone stale. Fix by re-pairing:
 
-1. Turn the TRV knob **4 times clockwise** within 10 seconds
+1. Turn the TRV knob **4 times clockwise/ccw** within 10 seconds to enter the menu and then turn the know to enter BLE pairing mode
 2. Wait for the next connection attempt (or restart the integration)
 
 ### TRV supports max 4 bonded peers
