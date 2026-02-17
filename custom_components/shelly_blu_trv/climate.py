@@ -56,6 +56,8 @@ class ShellyBluTrvClimate(ShellyBluTrvEntity, ClimateEntity):
         | ClimateEntityFeature.PRESET_MODE
     )
     _attr_preset_modes = [PRESET_NONE, PRESET_BOOST]
+    _attr_hvac_mode = HVACMode.HEAT
+    _attr_preset_mode = PRESET_NONE
 
     def __init__(self, coordinator: ShellyBluTrvCoordinator) -> None:
         """Initialize the climate entity."""
