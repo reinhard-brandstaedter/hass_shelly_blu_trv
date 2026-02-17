@@ -105,7 +105,7 @@ class ShellyBluTrvClimate(ShellyBluTrvEntity, ClimateEntity):
             self._attr_preset_mode = PRESET_NONE
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
-        """Set target temperature."""
+        """Set target temperature with verification."""
         temperature = kwargs.get(ATTR_TEMPERATURE)
         if temperature is None:
             return
@@ -116,13 +116,14 @@ class ShellyBluTrvClimate(ShellyBluTrvEntity, ClimateEntity):
             temperature,
         )
 
-        await self.coordinator.async_rpc_command(
-            "TRV.SetTarget", {"id": 0, "target_C": temperature}
-        )
+        verified = await self.coordinator.async_set_target_verified(temperature)
 
-        # Optimistically update state
-        self.coordinator.state.bthome.target_temperature = temperature
-        self.coordinator.state.status.target_C = temperature
+        if not verified:
+            # Fall back to optimistic update even if verification failed,
+            # so the UI doesn't appear stuck
+            self.coordinator.state.bthome.target_temperature = temperature
+            self.coordinator.state.status.target_C = temperature
+
         self.async_write_ha_state()
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:

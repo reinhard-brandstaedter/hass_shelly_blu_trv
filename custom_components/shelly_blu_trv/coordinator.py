@@ -222,6 +222,99 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
             self.ble_device = fresh
             self._client.set_ble_device(fresh)
 
+    async def async_set_target_verified(
+        self,
+        target_c: float,
+        verify_retries: int = 3,
+        verify_delay: float = 2.0,
+    ) -> bool:
+        """Set target temperature and verify the TRV accepted it.
+
+        Sends TRV.SetTarget then reads back TRV.GetStatus within the same
+        BLE connection to confirm the target was applied. Retries the set
+        command if the readback doesn't match.
+
+        Returns True if verified, False if all attempts failed.
+        """
+        last_error = None
+        for attempt in range(1, MAX_RETRIES + 1):
+            self._refresh_ble_device()
+
+            try:
+                async with _global_ble_lock:
+                    await self._client.connect()
+
+                    for verify_attempt in range(1, verify_retries + 1):
+                        await self._client.async_rpc_call(
+                            "TRV.SetTarget", {"id": 0, "target_C": target_c}
+                        )
+
+                        # Wait briefly for the TRV to process the command
+                        await asyncio.sleep(verify_delay)
+
+                        # Read back status to verify
+                        status = await self._client.async_get_status()
+
+                        if (
+                            status.target_C is not None
+                            and abs(status.target_C - target_c) < 0.1
+                        ):
+                            await self._client.disconnect()
+                            # Update state with verified values
+                            self.state.status.target_C = status.target_C
+                            self.state.bthome.target_temperature = status.target_C
+                            if status.pos is not None:
+                                self.state.status.pos = status.pos
+                            if status.current_C is not None:
+                                self.state.status.current_C = status.current_C
+                            self.state.last_rpc_poll = time.time()
+                            _LOGGER.debug(
+                                "Verified target temperature for %s: %.1f°C "
+                                "(attempt %d/%d)",
+                                self.device_name,
+                                status.target_C,
+                                verify_attempt,
+                                verify_retries,
+                            )
+                            return True
+
+                        _LOGGER.warning(
+                            "Target temperature mismatch for %s: "
+                            "requested=%.1f, got=%.1f (verify %d/%d)",
+                            self.device_name,
+                            target_c,
+                            status.target_C or 0,
+                            verify_attempt,
+                            verify_retries,
+                        )
+
+                    await self._client.disconnect()
+            except Exception as err:
+                last_error = err
+                _LOGGER.debug(
+                    "Set target verified attempt %d/%d failed for %s: %s",
+                    attempt,
+                    MAX_RETRIES,
+                    self.device_name,
+                    err,
+                )
+                try:
+                    await self._client.disconnect()
+                except Exception:
+                    pass
+
+            if attempt < MAX_RETRIES:
+                await asyncio.sleep(RETRY_DELAY)
+
+        _LOGGER.warning(
+            "Failed to verify target temperature %.1f for %s after %d attempts: %s",
+            target_c,
+            self.device_name,
+            MAX_RETRIES,
+            last_error,
+        )
+        return False
+
     async def async_rpc_command(
         self,
         method: str,
