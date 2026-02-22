@@ -14,5 +14,5 @@
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/reinhard-brandstaedter/hass_shelly_blu_trv/issues",
   "requirements": ["bleak>=0.21.0", "bleak-retry-connector>=3.1.0"],
-  "version": "0.1.4"
+  "version": "0.1.5"
 }
