@@ -190,20 +190,25 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                 old = self.state.status
                 if config.get("min_valve_position") is not None:
                     old.min_valve_position = config["min_valve_position"]
-                flags_raw = config.get("flags")
-                if flags_raw:
-                    flags = flags_raw[0] if isinstance(flags_raw, list) else flags_raw
-                    if isinstance(flags, dict):
-                        if "floor_heating" in flags:
-                            old.floor_heating = flags["floor_heating"]
-                        if "silent_mode" in flags:
-                            old.silent_mode = flags["silent_mode"]
-                    else:
-                        _LOGGER.debug(
-                            "Unexpected flags format in Trv.GetConfig for %s: %r",
-                            self.device_name,
-                            flags_raw,
-                        )
+                # Flags can come back as either:
+                #   list of active flag name strings: ["floor_heating", "anticlog"]
+                #   list with one dict (as per older docs): [{"floor_heating": true, ...}]
+                flags_raw = config.get("flags", [])
+                if isinstance(flags_raw, list) and flags_raw and isinstance(flags_raw[0], dict):
+                    # Dict style: [{"floor_heating": true, "silent_mode": false, ...}]
+                    flags_dict = flags_raw[0]
+                    old.floor_heating = flags_dict.get("floor_heating", False)
+                    old.silent_mode = flags_dict.get("silent_mode", False)
+                elif isinstance(flags_raw, list):
+                    # String list style: ["floor_heating", "anticlog"] — active flags only
+                    old.floor_heating = "floor_heating" in flags_raw
+                    old.silent_mode = "silent_mode" in flags_raw
+                else:
+                    _LOGGER.debug(
+                        "Unexpected flags format in Trv.GetConfig for %s: %r",
+                        self.device_name,
+                        flags_raw,
+                    )
                 self._last_config_poll = now
 
     @callback

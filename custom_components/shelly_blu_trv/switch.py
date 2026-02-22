@@ -82,19 +82,18 @@ class ShellyBluTrvSwitch(ShellyBluTrvEntity, SwitchEntity):
         self._attr_available = value is not None
         self.async_write_ha_state()
 
-    async def _set_flag(self, value: bool) -> None:
-        """Write a flags-nested config value to the TRV."""
-        await self.coordinator.async_rpc_command(
-            "Trv.SetConfig",
-            {"id": 0, "config": {"flags": {self.entity_description.config_key: value}}},
-        )
-        setattr(self.coordinator.state.status, self.entity_description.config_key, value)
-        self.async_write_ha_state()
-
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Enable the feature."""
-        await self._set_flag(True)
+        await self.coordinator.async_rpc_command(
+            "TRV.SetFlag", {"id": 0, "flag": self.entity_description.config_key}
+        )
+        setattr(self.coordinator.state.status, self.entity_description.config_key, True)
+        self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Disable the feature."""
-        await self._set_flag(False)
+        await self.coordinator.async_rpc_command(
+            "TRV.ClearFlag", {"id": 0, "flag": self.entity_description.config_key}
+        )
+        setattr(self.coordinator.state.status, self.entity_description.config_key, False)
+        self.async_write_ha_state()
