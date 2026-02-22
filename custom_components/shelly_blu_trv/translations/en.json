@@ -76,6 +76,17 @@
     "number": {
       "external_temperature": {
         "name": "External temperature"
+      },
+      "min_valve_position": {
+        "name": "Minimum valve position"
+      }
+    },
+    "switch": {
+      "floor_heating": {
+        "name": "Floor heating mode"
+      },
+      "silent_mode": {
+        "name": "Silent mode"
       }
     }
   }

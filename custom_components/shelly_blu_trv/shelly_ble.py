@@ -60,6 +60,10 @@ class ShellyBluTrvStatus:
     override_active: bool = False
     override_started_at: float | None = None
     override_duration: int | None = None
+    # Config fields (populated by Trv.GetConfig poll)
+    min_valve_position: int | None = None
+    floor_heating: bool | None = None
+    silent_mode: bool | None = None
 
 
 @dataclass

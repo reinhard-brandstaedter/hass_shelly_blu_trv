@@ -112,6 +112,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                 async with _global_ble_lock:
                     await self._client.connect()
                     status = await self._client.async_get_status()
+                    config = await self._client.async_get_config()
                     await self._client.disconnect()
 
                 # Merge new values into existing status, preserving previous
@@ -135,6 +136,14 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                 old.override_active = status.override_active
                 old.override_started_at = status.override_started_at
                 old.override_duration = status.override_duration
+
+                if config:
+                    if config.get("min_valve_position") is not None:
+                        old.min_valve_position = config["min_valve_position"]
+                    if "floor_heating" in config:
+                        old.floor_heating = config["floor_heating"]
+                    if "silent_mode" in config:
+                        old.silent_mode = config["silent_mode"]
 
                 self.state.last_rpc_poll = time.time()
                 _LOGGER.debug(

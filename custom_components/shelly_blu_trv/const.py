@@ -42,4 +42,4 @@ POLL_INTERVAL = 300  # 5 minutes for full RPC status poll
 BLE_IDLE_TIMEOUT = 10
 
 # Platforms
-PLATFORMS = ["climate", "sensor", "binary_sensor", "button", "number"]
+PLATFORMS = ["climate", "sensor", "binary_sensor", "button", "number", "switch"]
