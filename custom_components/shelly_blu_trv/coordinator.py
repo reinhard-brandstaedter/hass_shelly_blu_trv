@@ -19,6 +19,8 @@ from homeassistant.components.bluetooth.active_update_coordinator import (
 from homeassistant.core import HomeAssistant, callback
 
 from .const import DOMAIN, POLL_INTERVAL
+
+CONFIG_POLL_INTERVAL = 3600  # Re-fetch Trv.GetConfig at most once per hour
 from .shelly_ble import (
     BTHomeData,
     ShellyBluTrvBleClient,
@@ -73,6 +75,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
 
         self._client = ShellyBluTrvBleClient(ble_device, address)
         self._last_poll_time: float = 0
+        self._last_config_poll: float = 0
 
     @property
     def client(self) -> ShellyBluTrvBleClient:
@@ -101,6 +104,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         self.ble_device = service_info.device
         self._client.set_ble_device(service_info.device)
 
+        # --- Status poll (TRV.GetStatus) ---
         last_error = None
         for attempt in range(1, MAX_RETRIES + 1):
             # Refresh BLE device on retry attempts (first attempt uses
@@ -112,7 +116,6 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                 async with _global_ble_lock:
                     await self._client.connect()
                     status = await self._client.async_get_status()
-                    config = await self._client.async_get_config()
                     await self._client.disconnect()
 
                 # Merge new values into existing status, preserving previous
@@ -137,18 +140,6 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                 old.override_started_at = status.override_started_at
                 old.override_duration = status.override_duration
 
-                if config:
-                    if config.get("min_valve_position") is not None:
-                        old.min_valve_position = config["min_valve_position"]
-                    # Flags are returned as a list with one dict element
-                    flags_raw = config.get("flags")
-                    if flags_raw:
-                        flags = flags_raw[0] if isinstance(flags_raw, list) else flags_raw
-                        if "floor_heating" in flags:
-                            old.floor_heating = flags["floor_heating"]
-                        if "silent_mode" in flags:
-                            old.silent_mode = flags["silent_mode"]
-
                 self.state.last_rpc_poll = time.time()
                 _LOGGER.debug(
                     "Poll result for %s: target=%.1f, current=%.1f, pos=%s",
@@ -157,7 +148,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                     old.current_C or 0,
                     old.pos,
                 )
-                return  # Success
+                break  # Status poll succeeded
             except Exception as err:
                 last_error = err
                 _LOGGER.debug(
@@ -174,13 +165,46 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
 
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
+        else:
+            _LOGGER.warning(
+                "Failed to poll %s after %d attempts: %s",
+                self.device_name,
+                MAX_RETRIES,
+                last_error,
+            )
+            return
 
-        _LOGGER.warning(
-            "Failed to poll %s after %d attempts: %s",
-            self.device_name,
-            MAX_RETRIES,
-            last_error,
+        # --- Config poll (Trv.GetConfig) — separate connection, best-effort ---
+        # Kept separate to avoid stale RX_CTL state from the status call
+        # corrupting the config response when sharing the same BLE connection.
+        # Only fetched on first poll (values still None) or once per hour.
+        now = time.time()
+        needs_config = (
+            self.state.status.min_valve_position is None
+            or (now - self._last_config_poll) >= CONFIG_POLL_INTERVAL
         )
+        if needs_config:
+            config = await self.async_rpc_command("Trv.GetConfig", {"id": 0})
+            _LOGGER.debug("Trv.GetConfig result for %s: %s", self.device_name, config)
+            if config and isinstance(config, dict):
+                old = self.state.status
+                if config.get("min_valve_position") is not None:
+                    old.min_valve_position = config["min_valve_position"]
+                flags_raw = config.get("flags")
+                if flags_raw:
+                    flags = flags_raw[0] if isinstance(flags_raw, list) else flags_raw
+                    if isinstance(flags, dict):
+                        if "floor_heating" in flags:
+                            old.floor_heating = flags["floor_heating"]
+                        if "silent_mode" in flags:
+                            old.silent_mode = flags["silent_mode"]
+                    else:
+                        _LOGGER.debug(
+                            "Unexpected flags format in Trv.GetConfig for %s: %r",
+                            self.device_name,
+                            flags_raw,
+                        )
+                self._last_config_poll = now
 
     @callback
     def _async_handle_bluetooth_event(
