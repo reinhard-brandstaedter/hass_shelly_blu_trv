@@ -140,10 +140,14 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                 if config:
                     if config.get("min_valve_position") is not None:
                         old.min_valve_position = config["min_valve_position"]
-                    if "floor_heating" in config:
-                        old.floor_heating = config["floor_heating"]
-                    if "silent_mode" in config:
-                        old.silent_mode = config["silent_mode"]
+                    # Flags are returned as a list with one dict element
+                    flags_raw = config.get("flags")
+                    if flags_raw:
+                        flags = flags_raw[0] if isinstance(flags_raw, list) else flags_raw
+                        if "floor_heating" in flags:
+                            old.floor_heating = flags["floor_heating"]
+                        if "silent_mode" in flags:
+                            old.silent_mode = flags["silent_mode"]
 
                 self.state.last_rpc_poll = time.time()
                 _LOGGER.debug(
