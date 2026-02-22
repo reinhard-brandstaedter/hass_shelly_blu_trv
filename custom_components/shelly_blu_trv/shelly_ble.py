@@ -242,7 +242,15 @@ class ShellyBluTrvBleClient:
     async def connect(self) -> None:
         """Establish BLE connection."""
         if self._connected and self._client:
-            return
+            if self._client.is_connected:
+                return
+            # Connection was silently dropped by the peripheral; reset state
+            # so we fall through to establish_connection below.
+            _LOGGER.debug(
+                "Stale BLE connection detected for %s, reconnecting", self._address
+            )
+            self._connected = False
+            self._client = None
 
         _LOGGER.debug("Connecting to %s", self._address)
 
@@ -262,6 +270,18 @@ class ShellyBluTrvBleClient:
             self._address,
             self._mtu,
         )
+
+        # Verify the RPC characteristics are present in the GATT table.
+        # If service discovery failed or is incomplete the writes will fail
+        # with "Characteristic not found"; catching it here lets the retry
+        # loop reconnect instead of burning a write attempt.
+        for char_uuid in (SHELLY_RPC_TX_CTL_UUID, SHELLY_RPC_DATA_UUID):
+            if self._client.services.get_characteristic(char_uuid) is None:
+                await self.disconnect()
+                raise ConnectionError(
+                    f"RPC characteristic {char_uuid} not found on {self._address} "
+                    "(GATT service discovery incomplete)"
+                )
 
     async def disconnect(self) -> None:
         """Close BLE connection."""
