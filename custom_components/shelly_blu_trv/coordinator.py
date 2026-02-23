@@ -38,16 +38,28 @@ MAX_RETRIES = 3
 RETRY_DELAY = 10  # seconds between retries
 DEVICE_STARTUP_TIMEOUT = 300
 
-# How long to wait for the global BLE lock for user-initiated commands.
+# How long to wait for a per-proxy semaphore slot for user-initiated commands.
 # Polls wait indefinitely (see below) because skipping a poll resets the base
 # class timer and delays the next attempt by a full POLL_INTERVAL.  Commands
 # fail after CMD_LOCK_TIMEOUT to avoid hanging the HA UI indefinitely.
 CMD_LOCK_TIMEOUT = 120.0   # seconds: fail user command if BLE is busy
 
-# Global lock to serialize BLE connections across all TRV instances.
-# Only one TRV should connect through the BT proxy at a time to avoid
-# overwhelming the ESP32 proxy's limited connection capacity.
-_global_ble_lock = asyncio.Lock()
+# Per-proxy semaphore pool – allows up to PROXY_SLOTS simultaneous BLE
+# connections through the same BT proxy while letting TRVs on different
+# proxies connect fully in parallel.  ESP32C3 proxies have 3 slots; we
+# reserve one for other HA bluetooth activity, leaving 2 for ourselves.
+PROXY_SLOTS = 2
+_proxy_semaphores: dict[str, asyncio.Semaphore] = {}
+_fallback_semaphore = asyncio.Semaphore(1)  # conservative when proxy is unknown
+
+
+def _get_proxy_semaphore(proxy_source: str | None) -> asyncio.Semaphore:
+    """Return the semaphore for *proxy_source*, creating it on first use."""
+    if proxy_source is None:
+        return _fallback_semaphore
+    if proxy_source not in _proxy_semaphores:
+        _proxy_semaphores[proxy_source] = asyncio.Semaphore(PROXY_SLOTS)
+    return _proxy_semaphores[proxy_source]
 
 
 class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
@@ -125,13 +137,13 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
             if attempt > 1:
                 self._refresh_ble_device()
 
-            # Wait indefinitely for the global BLE lock.  Skipping a poll
+            # Wait indefinitely for the per-proxy semaphore.  Skipping a poll
             # (returning early) resets the base class poll timer, which would
             # delay the next attempt by a full POLL_INTERVAL – causing the
             # valve position to stay empty.  Waiting is safe: the disconnect
             # timeout in shelly_ble.py bounds the worst-case lock hold time.
             try:
-                async with _global_ble_lock:
+                async with _get_proxy_semaphore(self._resolve_proxy_source()):
                     await self._client.connect()
                     status = await self._client.async_get_status()
                     await self._client.disconnect()
@@ -277,6 +289,21 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
             proxy_source or "auto",
         )
 
+    def _resolve_proxy_source(self) -> str | None:
+        """Return the BT proxy source string used for semaphore selection.
+
+        Uses the preferred proxy when configured.  Falls back to whichever
+        scanner currently sees the device so that TRVs without a preferred
+        proxy can still benefit from per-proxy parallelism.
+        """
+        if self._preferred_proxy:
+            return self._preferred_proxy
+        for sd in async_scanner_devices_by_address(
+            self.hass, self._client.address, connectable=True
+        ):
+            return sd.scanner.source
+        return None
+
     def _refresh_ble_device(self) -> None:
         """Fetch a fresh BLE device reference from HA's bluetooth stack.
 
@@ -323,9 +350,10 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         for attempt in range(1, MAX_RETRIES + 1):
             self._refresh_ble_device()
 
+            proxy_sem = _get_proxy_semaphore(self._resolve_proxy_source())
             try:
                 await asyncio.wait_for(
-                    _global_ble_lock.acquire(), timeout=CMD_LOCK_TIMEOUT
+                    proxy_sem.acquire(), timeout=CMD_LOCK_TIMEOUT
                 )
             except asyncio.TimeoutError:
                 _LOGGER.warning(
@@ -397,7 +425,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                 except Exception:
                     pass
             finally:
-                _global_ble_lock.release()
+                proxy_sem.release()
 
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
@@ -460,8 +488,9 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
     ) -> Any:
         """Execute an RPC command with retries (connect, send, disconnect).
 
-        Uses a global lock to serialize BLE connections across all TRV
-        instances, preventing the BT proxy from being overwhelmed.
+        Uses a per-proxy semaphore (PROXY_SLOTS slots) to limit concurrent
+        BLE connections through the same BT proxy while allowing TRVs on
+        different proxies to proceed in parallel.
         Connection failures are logged but not raised for non-critical
         commands to avoid crashing the websocket API.
         """
@@ -470,9 +499,10 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
             # Get fresh BLE device reference before each attempt
             self._refresh_ble_device()
 
+            proxy_sem = _get_proxy_semaphore(self._resolve_proxy_source())
             try:
                 await asyncio.wait_for(
-                    _global_ble_lock.acquire(), timeout=CMD_LOCK_TIMEOUT
+                    proxy_sem.acquire(), timeout=CMD_LOCK_TIMEOUT
                 )
             except asyncio.TimeoutError:
                 _LOGGER.warning(
@@ -503,7 +533,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                 except Exception:
                     pass
             finally:
-                _global_ble_lock.release()
+                proxy_sem.release()
 
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
