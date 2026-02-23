@@ -38,14 +38,10 @@ MAX_RETRIES = 3
 RETRY_DELAY = 10  # seconds between retries
 DEVICE_STARTUP_TIMEOUT = 300
 
-# How long to wait for the global BLE lock before giving up.
-# ESP32 BT proxies have ~3 connection slots; we serialize to 1 at a time via
-# _global_ble_lock.  Without a timeout, N polling TRVs would queue up and the
-# last one would wait N × (connect + RPC + disconnect) ≈ N × 70 s.
-#
-# Polls are best-effort: skip if the queue is busy (the next advertisement will
-# trigger another attempt).  User-initiated commands wait longer before failing.
-POLL_LOCK_TIMEOUT = 60.0   # seconds: skip scheduled poll if BLE is busy
+# How long to wait for the global BLE lock for user-initiated commands.
+# Polls wait indefinitely (see below) because skipping a poll resets the base
+# class timer and delays the next attempt by a full POLL_INTERVAL.  Commands
+# fail after CMD_LOCK_TIMEOUT to avoid hanging the HA UI indefinitely.
 CMD_LOCK_TIMEOUT = 120.0   # seconds: fail user command if BLE is busy
 
 # Global lock to serialize BLE connections across all TRV instances.
@@ -129,46 +125,17 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
             if attempt > 1:
                 self._refresh_ble_device()
 
-            # Acquire the global BLE lock with a timeout.  If the proxy is
-            # already busy (another TRV is connected), skip this poll rather
-            # than queuing up – the next advertisement will trigger another
-            # attempt.  This prevents N TRVs from stacking up and exhausting
-            # the ESP32 proxy's connection slots.
+            # Wait indefinitely for the global BLE lock.  Skipping a poll
+            # (returning early) resets the base class poll timer, which would
+            # delay the next attempt by a full POLL_INTERVAL – causing the
+            # valve position to stay empty.  Waiting is safe: the disconnect
+            # timeout in shelly_ble.py bounds the worst-case lock hold time.
             try:
-                await asyncio.wait_for(
-                    _global_ble_lock.acquire(), timeout=POLL_LOCK_TIMEOUT
-                )
-            except asyncio.TimeoutError:
-                _LOGGER.debug(
-                    "BLE proxy busy for >%.0fs, skipping poll for %s",
-                    POLL_LOCK_TIMEOUT,
-                    self.device_name,
-                )
-                return
-
-            poll_ok = False
-            try:
-                await self._client.connect()
-                status = await self._client.async_get_status()
-                await self._client.disconnect()
-                poll_ok = True
-            except Exception as err:
-                last_error = err
-                _LOGGER.debug(
-                    "Poll attempt %d/%d failed for %s: %s",
-                    attempt,
-                    MAX_RETRIES,
-                    self.device_name,
-                    err,
-                )
-                try:
+                async with _global_ble_lock:
+                    await self._client.connect()
+                    status = await self._client.async_get_status()
                     await self._client.disconnect()
-                except Exception:
-                    pass
-            finally:
-                _global_ble_lock.release()
 
-            if poll_ok:
                 # Merge new values into existing status, preserving previous
                 # values for any fields that came back as None
                 old = self.state.status
@@ -200,6 +167,19 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                     old.pos,
                 )
                 break  # Status poll succeeded
+            except Exception as err:
+                last_error = err
+                _LOGGER.debug(
+                    "Poll attempt %d/%d failed for %s: %s",
+                    attempt,
+                    MAX_RETRIES,
+                    self.device_name,
+                    err,
+                )
+                try:
+                    await self._client.disconnect()
+                except Exception:
+                    pass
 
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
