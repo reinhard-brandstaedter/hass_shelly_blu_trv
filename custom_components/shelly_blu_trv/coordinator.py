@@ -22,6 +22,8 @@ from homeassistant.core import HomeAssistant, callback
 from .const import DOMAIN, POLL_INTERVAL
 
 CONFIG_POLL_INTERVAL = 3600  # Re-fetch Trv.GetConfig at most once per hour
+EXT_TEMP_MIN_INTERVAL = 60   # Minimum seconds between SetExternalTemperature BLE calls
+EXT_TEMP_MIN_DELTA = 0.3     # Minimum °C change required to send a new value
 from .shelly_ble import (
     BTHomeData,
     ShellyBluTrvBleClient,
@@ -89,6 +91,8 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         self._last_poll_time: float = 0
         self._last_config_poll: float = 0
         self._preferred_proxy: str | None = preferred_proxy
+        self._last_ext_temp_sent: float | None = None
+        self._last_ext_temp_time: float = 0
 
     @property
     def client(self) -> ShellyBluTrvBleClient:
@@ -426,6 +430,48 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
             last_error,
         )
         return False
+
+    async def async_set_external_temperature(self, temp_c: float) -> None:
+        """Push external temperature to the TRV, with debouncing.
+
+        The TRV is often in a low-power sleep state between advertisements
+        and rejects connections when bombarded with repeated requests.
+        Automations that feed an external sensor can fire every 30-60 s, so
+        we gate BLE calls to at most once per EXT_TEMP_MIN_INTERVAL seconds
+        and only when the value has shifted by more than EXT_TEMP_MIN_DELTA.
+        """
+        now = time.time()
+
+        if (
+            self._last_ext_temp_sent is not None
+            and abs(self._last_ext_temp_sent - temp_c) < EXT_TEMP_MIN_DELTA
+        ):
+            _LOGGER.debug(
+                "External temp %.1f°C unchanged (last: %.1f°C, delta < %.1f°C), skipping BLE for %s",
+                temp_c,
+                self._last_ext_temp_sent,
+                EXT_TEMP_MIN_DELTA,
+                self.device_name,
+            )
+            return
+
+        if (now - self._last_ext_temp_time) < EXT_TEMP_MIN_INTERVAL:
+            _LOGGER.debug(
+                "External temp update too recent (%.0fs ago, min %ds), skipping BLE for %s",
+                now - self._last_ext_temp_time,
+                EXT_TEMP_MIN_INTERVAL,
+                self.device_name,
+            )
+            return
+
+        # Update tracking BEFORE the call so rapid back-to-back invocations
+        # are gated even if the first call is still in-flight.
+        self._last_ext_temp_sent = temp_c
+        self._last_ext_temp_time = now
+
+        await self.async_rpc_command(
+            "TRV.SetExternalTemperature", {"id": 0, "t_C": temp_c}
+        )
 
     async def async_rpc_command(
         self,
