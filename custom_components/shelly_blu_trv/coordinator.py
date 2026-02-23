@@ -346,6 +346,11 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
 
         Returns True if verified, False if all attempts failed.
         """
+        _LOGGER.info(
+            "Setting target temperature for %s to %.1f°C",
+            self.device_name,
+            target_c,
+        )
         last_error = None
         for attempt in range(1, MAX_RETRIES + 1):
             self._refresh_ble_device()
@@ -390,11 +395,13 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                         if status.current_C is not None:
                             self.state.status.current_C = status.current_C
                         self.state.last_rpc_poll = time.time()
-                        _LOGGER.debug(
-                            "Verified target temperature for %s: %.1f°C "
-                            "(attempt %d/%d)",
+                        _LOGGER.info(
+                            "Target temperature verified for %s: %.1f°C "
+                            "(outer attempt %d/%d, verify %d/%d)",
                             self.device_name,
                             status.target_C,
+                            attempt,
+                            MAX_RETRIES,
                             verify_attempt,
                             verify_retries,
                         )
@@ -413,7 +420,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                 await self._client.disconnect()
             except Exception as err:
                 last_error = err
-                _LOGGER.debug(
+                _LOGGER.warning(
                     "Set target verified attempt %d/%d failed for %s: %s",
                     attempt,
                     MAX_RETRIES,
@@ -520,7 +527,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                 return result
             except Exception as err:
                 last_error = err
-                _LOGGER.debug(
+                _LOGGER.warning(
                     "RPC %s attempt %d/%d failed for %s: %s",
                     method,
                     attempt,
