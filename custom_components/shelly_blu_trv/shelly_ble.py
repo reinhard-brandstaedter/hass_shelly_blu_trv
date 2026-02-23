@@ -292,9 +292,9 @@ class ShellyBluTrvBleClient:
         if self._client and self._connected:
             _LOGGER.debug("Disconnecting from %s", self._address)
             try:
-                await self._client.disconnect()
-            except Exception:
-                _LOGGER.debug("Error during disconnect", exc_info=True)
+                await asyncio.wait_for(self._client.disconnect(), timeout=10.0)
+            except (asyncio.TimeoutError, Exception):
+                _LOGGER.debug("Error during disconnect from %s", self._address, exc_info=True)
             finally:
                 self._connected = False
                 self._client = None
