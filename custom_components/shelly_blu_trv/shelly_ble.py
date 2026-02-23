@@ -258,11 +258,17 @@ class ShellyBluTrvBleClient:
 
         _LOGGER.debug("Connecting to %s", self._address)
 
+        # max_attempts=1: let our outer MAX_RETRIES loop handle retries with a
+        # proper RETRY_DELAY between attempts.  Using max_attempts=3 here AND
+        # MAX_RETRIES=3 in the coordinator results in 9 total connection
+        # attempts (3×3) per poll, holding the global lock for 120–180 s when
+        # a proxy is offline.  One internal attempt + 3 outer attempts is both
+        # faster to fail and keeps lock-hold time bounded.
         self._client = await establish_connection(
             BleakClient,
             self._ble_device,
             self._address,
-            max_attempts=3,
+            max_attempts=1,
         )
         self._connected = True
 
