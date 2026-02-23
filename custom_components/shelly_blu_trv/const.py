@@ -27,6 +27,9 @@ CONF_DEVICE_NAME = "device_name"
 CONF_DEVICE_MODEL = "device_model"
 CONF_DEVICE_FW = "device_fw"
 
+# Options keys
+CONF_PREFERRED_PROXY = "preferred_proxy"
+
 # TRV temperature limits
 TRV_MIN_TEMP = 5.0
 TRV_MAX_TEMP = 30.0

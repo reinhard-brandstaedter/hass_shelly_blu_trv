@@ -12,6 +12,7 @@ from homeassistant.components.bluetooth import (
     BluetoothScannerDevice,
     BluetoothServiceInfoBleak,
     async_ble_device_from_address,
+    async_scanner_devices_by_address,
 )
 from homeassistant.components.bluetooth.active_update_coordinator import (
     ActiveBluetoothDataUpdateCoordinator,
@@ -52,6 +53,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         device_name: str,
         model: str | None = None,
         firmware: str | None = None,
+        preferred_proxy: str | None = None,
     ) -> None:
         """Initialize the coordinator."""
         super().__init__(
@@ -76,6 +78,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         self._client = ShellyBluTrvBleClient(ble_device, address)
         self._last_poll_time: float = 0
         self._last_config_poll: float = 0
+        self._preferred_proxy: str | None = preferred_proxy
 
     @property
     def client(self) -> ShellyBluTrvBleClient:
@@ -250,13 +253,36 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
 
         super()._async_handle_bluetooth_event(service_info, change)
 
+    def set_preferred_proxy(self, proxy_source: str | None) -> None:
+        """Update the preferred BT proxy at runtime (called from options listener)."""
+        self._preferred_proxy = proxy_source
+        _LOGGER.debug(
+            "Preferred proxy for %s set to: %s",
+            self.device_name,
+            proxy_source or "auto",
+        )
+
     def _refresh_ble_device(self) -> None:
         """Fetch a fresh BLE device reference from HA's bluetooth stack.
 
-        This ensures we always connect through the best available proxy
-        with the most up-to-date connection info, rather than relying on
-        a potentially stale reference from a previous advertisement.
+        If a preferred proxy is configured, use it exclusively so the TRV
+        always connects through the bonded proxy. Falls back to best available
+        if the preferred proxy is not currently reachable.
         """
+        if self._preferred_proxy:
+            for sd in async_scanner_devices_by_address(
+                self.hass, self._client.address, connectable=True
+            ):
+                if sd.scanner.source == self._preferred_proxy:
+                    self.ble_device = sd.ble_device
+                    self._client.set_ble_device(sd.ble_device)
+                    return
+            _LOGGER.debug(
+                "Preferred proxy %s not reachable for %s, falling back to best available",
+                self._preferred_proxy,
+                self.device_name,
+            )
+
         fresh = async_ble_device_from_address(
             self.hass, self._client.address, connectable=True
         )

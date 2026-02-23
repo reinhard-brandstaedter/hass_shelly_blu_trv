@@ -9,19 +9,24 @@ import voluptuous as vol
 from homeassistant.components.bluetooth import (
     BluetoothServiceInfoBleak,
     async_discovered_service_info,
+    async_scanner_devices_by_address,
 )
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
 from homeassistant.const import CONF_ADDRESS
+from homeassistant.core import callback
 
 from .const import (
     CONF_DEVICE_ADDRESS,
     CONF_DEVICE_FW,
     CONF_DEVICE_MODEL,
     CONF_DEVICE_NAME,
+    CONF_PREFERRED_PROXY,
     DOMAIN,
     SHELLY_MANUFACTURER_ID,
     SHELLY_RPC_SERVICE_UUID,
 )
+
+_PROXY_AUTO = ""  # sentinel: let HA pick the best available proxy
 from .shelly_ble import ShellyBluTrvBleClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -31,6 +36,12 @@ class ShellyBluTrvConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Shelly BLU TRV."""
 
     VERSION = 1
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> ShellyBluTrvOptionsFlow:
+        """Return the options flow."""
+        return ShellyBluTrvOptionsFlow(config_entry)
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -238,4 +249,44 @@ class ShellyBluTrvConfigFlow(ConfigFlow, domain=DOMAIN):
                 "name": self._name,
                 "address": self._address,
             },
+        )
+
+
+class ShellyBluTrvOptionsFlow(OptionsFlow):
+    """Handle options for Shelly BLU TRV."""
+
+    def __init__(self, config_entry: ConfigEntry) -> None:
+        """Initialize the options flow."""
+        self._config_entry = config_entry
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show the options form."""
+        if user_input is not None:
+            selected = user_input.get(CONF_PREFERRED_PROXY, _PROXY_AUTO)
+            return self.async_create_entry(
+                data={CONF_PREFERRED_PROXY: selected if selected != _PROXY_AUTO else None}
+            )
+
+        address = self._config_entry.data[CONF_DEVICE_ADDRESS]
+        proxy_options: dict[str, str] = {_PROXY_AUTO: "Auto (best available)"}
+        for sd in async_scanner_devices_by_address(
+            self.hass, address, connectable=True
+        ):
+            source = sd.scanner.source
+            name = getattr(sd.scanner, "name", source)
+            proxy_options[source] = f"{name} ({source})"
+
+        current = self._config_entry.options.get(CONF_PREFERRED_PROXY) or _PROXY_AUTO
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_PREFERRED_PROXY, default=current): vol.In(
+                        proxy_options
+                    ),
+                }
+            ),
         )

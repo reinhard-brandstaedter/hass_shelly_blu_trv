@@ -30,6 +30,17 @@
       "already_configured": "This device is already configured."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Shelly BLU TRV Options",
+        "description": "Configure options for this Shelly BLU TRV device.",
+        "data": {
+          "preferred_proxy": "Preferred Bluetooth proxy"
+        }
+      }
+    }
+  },
   "entity": {
     "sensor": {
       "current_temperature": {
