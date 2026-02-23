@@ -125,9 +125,14 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         """Poll the device for full status via RPC."""
         _LOGGER.debug("Polling %s for full status", self.device_name)
 
-        # Update BLE device reference
-        self.ble_device = service_info.device
-        self._client.set_ble_device(service_info.device)
+        # Update BLE device reference — but only when no preferred proxy is
+        # configured.  service_info.device reflects whichever proxy triggered
+        # the advertisement (could be the wrong one for bonded devices).
+        # _refresh_ble_device() called inside the retry loop handles the
+        # preferred-proxy case correctly.
+        if not self._preferred_proxy:
+            self.ble_device = service_info.device
+            self._client.set_ble_device(service_info.device)
 
         # --- Status poll (TRV.GetStatus) ---
         last_error = None
@@ -307,9 +312,12 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
     def _refresh_ble_device(self) -> None:
         """Fetch a fresh BLE device reference from HA's bluetooth stack.
 
-        If a preferred proxy is configured, use it exclusively so the TRV
-        always connects through the bonded proxy. Falls back to best available
-        if the preferred proxy is not currently reachable.
+        If a preferred proxy is configured, use it exclusively — never fall
+        back to a different proxy.  TRVs are BLE-bonded to a specific proxy
+        hardware; connecting through any other proxy will fail authentication.
+        If the preferred proxy has not seen a recent advertisement, keep the
+        existing device reference so the next connection attempt still targets
+        the correct proxy rather than silently switching to the wrong one.
         """
         if self._preferred_proxy:
             for sd in async_scanner_devices_by_address(
@@ -319,11 +327,17 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                     self.ble_device = sd.ble_device
                     self._client.set_ble_device(sd.ble_device)
                     return
-            _LOGGER.debug(
-                "Preferred proxy %s not reachable for %s, falling back to best available",
+            # Preferred proxy has no recent advertisement for this device.
+            # Keep the existing device reference (last known via the correct
+            # proxy) and let the connection attempt fail cleanly rather than
+            # silently routing through a different proxy that cannot authenticate.
+            _LOGGER.warning(
+                "Preferred proxy %s has no recent advertisement for %s "
+                "— keeping existing device reference, skipping fallback",
                 self._preferred_proxy,
                 self.device_name,
             )
+            return
 
         fresh = async_ble_device_from_address(
             self.hass, self._client.address, connectable=True
