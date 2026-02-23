@@ -432,9 +432,20 @@ class ShellyBluTrvBleClient:
         status = ShellyBluTrvStatus()
 
         if result is None:
+            _LOGGER.warning(
+                "TRV.GetStatus returned no result from %s (RPC call failed or timed out)",
+                self._address,
+            )
             return status
 
         status.pos = result.get("pos")
+        if status.pos is None:
+            _LOGGER.warning(
+                "TRV.GetStatus from %s succeeded but 'pos' is missing/null — "
+                "full response: %s",
+                self._address,
+                result,
+            )
         status.current_C = result.get("current_C")
         status.target_C = result.get("target_C")
         status.steps = result.get("steps")
