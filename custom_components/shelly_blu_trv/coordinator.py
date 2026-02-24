@@ -137,10 +137,11 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         # --- Status poll (TRV.GetStatus) ---
         last_error = None
         for attempt in range(1, MAX_RETRIES + 1):
-            # Refresh BLE device on retry attempts (first attempt uses
-            # the device from service_info, retries get a fresh reference)
-            if attempt > 1:
-                self._refresh_ble_device()
+            # Always refresh the BLE device reference before each attempt.
+            # When a preferred proxy is set, service_info.device is intentionally
+            # not applied (it may be from the wrong proxy), so _refresh_ble_device
+            # is the only place the correct proxy device gets set.
+            self._refresh_ble_device()
 
             # Wait indefinitely for the per-proxy semaphore.  Skipping a poll
             # (returning early) resets the base class poll timer, which would
