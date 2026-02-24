@@ -584,7 +584,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                     method,
                     self.device_name,
                 )
-                return None
+                return COMMAND_FAILED
 
             try:
                 await self._client.connect()
