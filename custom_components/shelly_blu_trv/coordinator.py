@@ -24,8 +24,8 @@ from .const import DOMAIN, POLL_INTERVAL
 CONFIG_POLL_INTERVAL = 3600  # Re-fetch Trv.GetConfig at most once per hour
 EXT_TEMP_MIN_INTERVAL = 60    # Minimum seconds between SetExternalTemperature BLE calls
 EXT_TEMP_MIN_DELTA = 0.3      # Minimum °C change required to send a new value
-EXT_TEMP_KEEPALIVE = 900      # Force resend after this many seconds even if value unchanged
-                               # Prevents the TRV's ext_temp_missing timeout (~30-40 min)
+EXT_TEMP_KEEPALIVE = 600      # Force resend after this many seconds even if value unchanged
+                               # Prevents the TRV's ext_temp_missing timeout (~32 min observed)
 from .shelly_ble import (
     BTHomeData,
     ShellyBluTrvBleClient,
@@ -177,6 +177,15 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                 old.not_mounted = status.not_mounted
                 old.battery_low = status.battery_low
                 old.ext_temp_missing = status.ext_temp_missing
+                if status.ext_temp_missing:
+                    # TRV has dropped the external temperature — reset the
+                    # keepalive timer so the next automation invocation
+                    # bypasses the delta check and resends immediately.
+                    _LOGGER.debug(
+                        "ext_temp_missing detected for %s — resetting ext temp timer",
+                        self.device_name,
+                    )
+                    self._last_ext_temp_time = 0
                 old.boost_active = status.boost_active
                 old.boost_started_at = status.boost_started_at
                 old.boost_duration = status.boost_duration
