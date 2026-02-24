@@ -22,8 +22,10 @@ from homeassistant.core import HomeAssistant, callback
 from .const import DOMAIN, POLL_INTERVAL
 
 CONFIG_POLL_INTERVAL = 3600  # Re-fetch Trv.GetConfig at most once per hour
-EXT_TEMP_MIN_INTERVAL = 60   # Minimum seconds between SetExternalTemperature BLE calls
-EXT_TEMP_MIN_DELTA = 0.3     # Minimum °C change required to send a new value
+EXT_TEMP_MIN_INTERVAL = 60    # Minimum seconds between SetExternalTemperature BLE calls
+EXT_TEMP_MIN_DELTA = 0.3      # Minimum °C change required to send a new value
+EXT_TEMP_KEEPALIVE = 900      # Force resend after this many seconds even if value unchanged
+                               # Prevents the TRV's ext_temp_missing timeout (~30-40 min)
 from .shelly_ble import (
     BTHomeData,
     ShellyBluTrvBleClient,
@@ -474,17 +476,23 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         return False
 
     async def async_set_external_temperature(self, temp_c: float) -> None:
-        """Push external temperature to the TRV, with debouncing.
+        """Push external temperature to the TRV, with debouncing and keepalive.
 
         The TRV is often in a low-power sleep state between advertisements
         and rejects connections when bombarded with repeated requests.
         Automations that feed an external sensor can fire every 30-60 s, so
         we gate BLE calls to at most once per EXT_TEMP_MIN_INTERVAL seconds
         and only when the value has shifted by more than EXT_TEMP_MIN_DELTA.
+
+        Additionally, even if the value is stable we force a resend every
+        EXT_TEMP_KEEPALIVE seconds to refresh the TRV's internal expiry
+        timer and prevent it from entering ext_temp_missing state.
         """
         now = time.time()
+        time_since_last = now - self._last_ext_temp_time
+        keepalive_due = time_since_last >= EXT_TEMP_KEEPALIVE
 
-        if (
+        if not keepalive_due and (
             self._last_ext_temp_sent is not None
             and abs(self._last_ext_temp_sent - temp_c) < EXT_TEMP_MIN_DELTA
         ):
@@ -497,14 +505,22 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
             )
             return
 
-        if (now - self._last_ext_temp_time) < EXT_TEMP_MIN_INTERVAL:
+        if time_since_last < EXT_TEMP_MIN_INTERVAL:
             _LOGGER.debug(
                 "External temp update too recent (%.0fs ago, min %ds), skipping BLE for %s",
-                now - self._last_ext_temp_time,
+                time_since_last,
                 EXT_TEMP_MIN_INTERVAL,
                 self.device_name,
             )
             return
+
+        if keepalive_due and self._last_ext_temp_sent is not None:
+            _LOGGER.debug(
+                "External temp keepalive for %s: resending %.1f°C after %.0fs",
+                self.device_name,
+                temp_c,
+                time_since_last,
+            )
 
         # Pre-update tracking so rapid back-to-back invocations are gated
         # even if the first call is still in-flight.  If the call ultimately
