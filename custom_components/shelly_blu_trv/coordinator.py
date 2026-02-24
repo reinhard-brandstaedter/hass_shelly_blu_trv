@@ -62,6 +62,12 @@ def _get_proxy_semaphore(proxy_source: str | None) -> asyncio.Semaphore:
     return _proxy_semaphores[proxy_source]
 
 
+# Sentinel returned by async_rpc_command when all retries are exhausted.
+# Distinct from None, which is a valid successful result for RPC methods
+# that return null (e.g. TRV.SetExternalTemperature).
+COMMAND_FAILED = object()
+
+
 class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
     """Coordinator for Shelly BLU TRV device data."""
 
@@ -500,14 +506,28 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
             )
             return
 
-        # Update tracking BEFORE the call so rapid back-to-back invocations
-        # are gated even if the first call is still in-flight.
+        # Pre-update tracking so rapid back-to-back invocations are gated
+        # even if the first call is still in-flight.  If the call ultimately
+        # fails we revert _last_ext_temp_sent to the previously confirmed
+        # value so future calls compare against what the TRV actually has,
+        # not a value that was never delivered.
+        prev_sent = self._last_ext_temp_sent
         self._last_ext_temp_sent = temp_c
         self._last_ext_temp_time = now
 
-        await self.async_rpc_command(
+        result = await self.async_rpc_command(
             "TRV.SetExternalTemperature", {"id": 0, "t_C": temp_c}
         )
+
+        if result is COMMAND_FAILED:
+            _LOGGER.warning(
+                "Failed to deliver external temp %.1f°C to %s — "
+                "reverting debounce state so next call will retry",
+                temp_c,
+                self.device_name,
+            )
+            self._last_ext_temp_sent = prev_sent
+            self._last_ext_temp_time = 0  # don't rate-limit the retry
 
     async def async_rpc_command(
         self,
@@ -573,4 +593,4 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
             MAX_RETRIES,
             last_error,
         )
-        return None
+        return COMMAND_FAILED
