@@ -233,6 +233,7 @@ class ShellyBluTrvBleClient:
         self._lock = asyncio.Lock()
         self._connected = False
         self._mtu: int = 20  # Conservative default, will negotiate higher
+        self._source_hint: str | None = None  # Set by coordinator before each connect
 
     @property
     def address(self) -> str:
@@ -243,19 +244,18 @@ class ShellyBluTrvBleClient:
         """Update the BLE device reference."""
         self._ble_device = ble_device
 
-    def _proxy_source(self) -> str:
-        """Return the BT proxy/scanner source for logging.
+    def set_source_hint(self, source: str | None) -> None:
+        """Set the BT proxy/scanner source used in log messages.
 
-        HA sets ``BLEDevice.details["source"]`` to the scanner source string
-        (e.g. ``"bt-proxy-1"``) when the device is seen via an ESPHome proxy.
-        Falls back to an empty string so callers can safely append it.
+        Called by the coordinator (which has reliable proxy info via
+        _resolve_proxy_source()) before every connect attempt so that
+        all BLE log lines show which proxy is being used.
         """
-        details = getattr(self._ble_device, "details", None)
-        if isinstance(details, dict):
-            source = details.get("source")
-            if source:
-                return source
-        return "?"
+        self._source_hint = source
+
+    def _proxy_source(self) -> str:
+        """Return the proxy source for log messages."""
+        return self._source_hint or "?"
 
     async def connect(self) -> None:
         """Establish BLE connection."""

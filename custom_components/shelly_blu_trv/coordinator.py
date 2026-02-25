@@ -334,7 +334,8 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         return None
 
     def _refresh_ble_device(self) -> None:
-        """Fetch a fresh BLE device reference from HA's bluetooth stack.
+        """Fetch a fresh BLE device reference from HA's bluetooth stack and
+        update the BLE client's proxy source hint for log messages.
 
         If a preferred proxy is configured, use it exclusively — never fall
         back to a different proxy.  TRVs are BLE-bonded to a specific proxy
@@ -343,6 +344,10 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         existing device reference so the next connection attempt still targets
         the correct proxy rather than silently switching to the wrong one.
         """
+        # Always keep the proxy source hint in sync so BLE log messages show
+        # which proxy is being used for this attempt.
+        self._client.set_source_hint(self._resolve_proxy_source())
+
         if self._preferred_proxy:
             for sd in async_scanner_devices_by_address(
                 self.hass, self._client.address, connectable=True
