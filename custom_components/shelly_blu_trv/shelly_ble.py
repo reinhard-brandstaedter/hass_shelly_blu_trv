@@ -467,10 +467,11 @@ class ShellyBluTrvBleClient:
         status.current_C = result.get("current_C")
         status.target_C = result.get("target_C")
         status.steps = result.get("steps")
-        status.not_calibrated = result.get("not_calibrated", False)
-        status.not_mounted = result.get("not_mounted", False)
-        status.battery_low = result.get("battery_low", False)
-        status.ext_temp_missing = result.get("ext_temp_missing", False)
+        errors = result.get("errors", [])
+        status.not_calibrated = "not_calibrated" in errors
+        status.not_mounted = "not_mounted" in errors
+        status.battery_low = "battery_low" in errors
+        status.ext_temp_missing = "ext_temp_missing" in errors
 
         boost = result.get("boost")
         if boost:
