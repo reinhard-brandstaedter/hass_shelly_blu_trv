@@ -243,6 +243,20 @@ class ShellyBluTrvBleClient:
         """Update the BLE device reference."""
         self._ble_device = ble_device
 
+    def _proxy_source(self) -> str:
+        """Return the BT proxy/scanner source for logging.
+
+        HA sets ``BLEDevice.details["source"]`` to the scanner source string
+        (e.g. ``"bt-proxy-1"``) when the device is seen via an ESPHome proxy.
+        Falls back to an empty string so callers can safely append it.
+        """
+        details = getattr(self._ble_device, "details", None)
+        if isinstance(details, dict):
+            source = details.get("source")
+            if source:
+                return source
+        return "?"
+
     async def connect(self) -> None:
         """Establish BLE connection."""
         if self._connected and self._client:
@@ -251,12 +265,14 @@ class ShellyBluTrvBleClient:
             # Connection was silently dropped by the peripheral; reset state
             # so we fall through to establish_connection below.
             _LOGGER.debug(
-                "Stale BLE connection detected for %s, reconnecting", self._address
+                "Stale BLE connection detected for %s via %s, reconnecting",
+                self._address,
+                self._proxy_source(),
             )
             self._connected = False
             self._client = None
 
-        _LOGGER.debug("Connecting to %s", self._address)
+        _LOGGER.debug("Connecting to %s via %s", self._address, self._proxy_source())
 
         # max_attempts=1: let our outer MAX_RETRIES loop handle retries with a
         # proper RETRY_DELAY between attempts.  Using max_attempts=3 here AND
@@ -276,8 +292,9 @@ class ShellyBluTrvBleClient:
         self._mtu = min(self._client.mtu_size - 3, 512) if self._client.mtu_size else 20
 
         _LOGGER.debug(
-            "Connected to %s, MTU: %d",
+            "Connected to %s via %s, MTU: %d",
             self._address,
+            self._proxy_source(),
             self._mtu,
         )
 
@@ -296,7 +313,7 @@ class ShellyBluTrvBleClient:
     async def disconnect(self) -> None:
         """Close BLE connection."""
         if self._client and self._connected:
-            _LOGGER.debug("Disconnecting from %s", self._address)
+            _LOGGER.debug("Disconnecting from %s via %s", self._address, self._proxy_source())
             try:
                 await asyncio.wait_for(self._client.disconnect(), timeout=10.0)
             except (asyncio.TimeoutError, Exception):
@@ -340,8 +357,9 @@ class ShellyBluTrvBleClient:
             payload_length = len(payload)
 
             _LOGGER.debug(
-                "RPC call to %s: %s (payload: %d bytes)",
+                "RPC call to %s via %s: %s (payload: %d bytes)",
                 self._address,
+                self._proxy_source(),
                 method,
                 payload_length,
             )
