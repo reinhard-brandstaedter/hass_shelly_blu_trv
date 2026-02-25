@@ -438,7 +438,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                         if status.current_C is not None:
                             self.state.status.current_C = status.current_C
                         self.state.last_rpc_poll = time.time()
-                        self.async_set_updated_data(None)
+                        self.async_update_listeners()
                         _LOGGER.info(
                             "Target temperature verified for %s: %.1f°C "
                             "(outer attempt %d/%d, verify %d/%d)",
