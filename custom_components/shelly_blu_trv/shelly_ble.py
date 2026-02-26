@@ -292,10 +292,11 @@ class ShellyBluTrvBleClient:
         self._mtu = min(self._client.mtu_size - 3, 512) if self._client.mtu_size else 20
 
         _LOGGER.debug(
-            "Connected to %s via %s, MTU: %d",
+            "Connected to %s via %s, MTU: %d, RSSI: %s dBm",
             self._address,
             self._proxy_source(),
             self._mtu,
+            self._ble_device.rssi if self._ble_device else "?",
         )
 
         # Verify the RPC characteristics are present in the GATT table.
