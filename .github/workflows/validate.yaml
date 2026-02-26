@@ -19,6 +19,10 @@ jobs:
         uses: hacs/action@main
         with:
           category: integration
+          # brands check requires domain in home-assistant/brands repo; ignored
+          # here because HA 2026.3 brands proxy API allows local brand/ images
+          # directly in the integration — remove this once hacs/action supports it
+          ignore: brands
 
   validate-hassfest:
     runs-on: ubuntu-latest
