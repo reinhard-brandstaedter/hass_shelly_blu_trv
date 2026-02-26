@@ -140,7 +140,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         # preferred-proxy case correctly.
         if not self._preferred_proxy:
             self.ble_device = service_info.device
-            self._client.set_ble_device(service_info.device)
+            self._client.set_ble_device(service_info.device, rssi=service_info.rssi)
 
         # --- Status poll (TRV.GetStatus) ---
         last_error = None
@@ -278,7 +278,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         # route through the wrong proxy, breaking bonded TRVs.
         if not self._preferred_proxy or service_info.source == self._preferred_proxy:
             self.ble_device = service_info.device
-            self._client.set_ble_device(service_info.device)
+            self._client.set_ble_device(service_info.device, rssi=service_info.rssi)
 
         # Parse BTHome advertisement data
         bthome = parse_bthome_advertisement(

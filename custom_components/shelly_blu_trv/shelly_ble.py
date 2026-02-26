@@ -234,15 +234,18 @@ class ShellyBluTrvBleClient:
         self._connected = False
         self._mtu: int = 20  # Conservative default, will negotiate higher
         self._source_hint: str | None = None  # Set by coordinator before each connect
+        self._rssi: int | None = None  # Last advertisement RSSI from coordinator
 
     @property
     def address(self) -> str:
         """Return the BLE address."""
         return self._address
 
-    def set_ble_device(self, ble_device: BLEDevice) -> None:
-        """Update the BLE device reference."""
+    def set_ble_device(self, ble_device: BLEDevice, rssi: int | None = None) -> None:
+        """Update the BLE device reference and last known advertisement RSSI."""
         self._ble_device = ble_device
+        if rssi is not None:
+            self._rssi = rssi
 
     def set_source_hint(self, source: str | None) -> None:
         """Set the BT proxy/scanner source used in log messages.
@@ -296,7 +299,7 @@ class ShellyBluTrvBleClient:
             self._address,
             self._proxy_source(),
             self._mtu,
-            getattr(self._ble_device, "rssi", "?") if self._ble_device else "?",
+            self._rssi if self._rssi is not None else "?",
         )
 
         # Verify the RPC characteristics are present in the GATT table.
