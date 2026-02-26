@@ -296,7 +296,7 @@ class ShellyBluTrvBleClient:
             self._address,
             self._proxy_source(),
             self._mtu,
-            self._ble_device.rssi if self._ble_device else "?",
+            getattr(self._ble_device, "rssi", "?") if self._ble_device else "?",
         )
 
         # Verify the RPC characteristics are present in the GATT table.
