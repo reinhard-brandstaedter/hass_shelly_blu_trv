@@ -284,17 +284,22 @@ class ShellyBluTrvBleClient:
 
         _LOGGER.debug("Connecting to %s via %s", self._address, self._proxy_source())
 
+        # Snapshot the BLE device and pass it as ble_device_callback so that
+        # establish_connection always uses the preferred-proxy device regardless
+        # of how many internal retry attempts it makes.  Without this, HA's
+        # multi-proxy wrapper of establish_connection queries
+        # async_ble_device_from_address() on each attempt and falls back to
+        # other proxies (e.g. a previously-bonded tempsensor-wz), bypassing our
+        # preferred-proxy filtering entirely.
         # max_attempts=1: let our outer MAX_RETRIES loop handle retries with a
-        # proper RETRY_DELAY between attempts.  Using max_attempts=3 here AND
-        # MAX_RETRIES=3 in the coordinator results in 9 total connection
-        # attempts (3×3) per poll, holding the global lock for 120–180 s when
-        # a proxy is offline.  One internal attempt + 3 outer attempts is both
-        # faster to fail and keeps lock-hold time bounded.
+        # proper RETRY_DELAY between attempts.
+        _device = self._ble_device
         self._client = await establish_connection(
             BleakClient,
-            self._ble_device,
+            _device,
             self._address,
             max_attempts=1,
+            ble_device_callback=lambda: _device,
         )
         self._connected = True
 
