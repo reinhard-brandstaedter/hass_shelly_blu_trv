@@ -150,73 +150,86 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
             # When a preferred proxy is set, service_info.device is intentionally
             # not applied (it may be from the wrong proxy), so _refresh_ble_device
             # is the only place the correct proxy device gets set.
-            self._refresh_ble_device()
-
-            # Wait indefinitely for the per-proxy semaphore.  Skipping a poll
-            # (returning early) resets the base class poll timer, which would
-            # delay the next attempt by a full POLL_INTERVAL – causing the
-            # valve position to stay empty.  Waiting is safe: the disconnect
-            # timeout in shelly_ble.py bounds the worst-case lock hold time.
-            async with self._device_lock:
-                try:
-                    async with _get_proxy_semaphore(self._resolve_proxy_source()):
-                        await self._client.connect()
-                        status = await self._client.async_get_status()
-                        await self._client.disconnect()
-
-                    # Merge new values into existing status, preserving previous
-                    # values for any fields that came back as None
-                    old = self.state.status
-                    if status.pos is not None:
-                        old.pos = status.pos
-                    if status.current_C is not None:
-                        old.current_C = status.current_C
-                    if status.target_C is not None:
-                        old.target_C = status.target_C
-                    if status.steps is not None:
-                        old.steps = status.steps
-                    old.not_calibrated = status.not_calibrated
-                    old.not_mounted = status.not_mounted
-                    old.battery_low = status.battery_low
-                    old.ext_temp_missing = status.ext_temp_missing
-                    if status.ext_temp_missing:
-                        # TRV has dropped the external temperature — reset the
-                        # keepalive timer so the next automation invocation
-                        # bypasses the delta check and resends immediately.
-                        _LOGGER.debug(
-                            "ext_temp_missing detected for %s — resetting ext temp timer",
-                            self.device_name,
-                        )
-                        self._last_ext_temp_time = 0
-                    old.boost_active = status.boost_active
-                    old.boost_started_at = status.boost_started_at
-                    old.boost_duration = status.boost_duration
-                    old.override_active = status.override_active
-                    old.override_started_at = status.override_started_at
-                    old.override_duration = status.override_duration
-
-                    self.state.last_rpc_poll = time.time()
-                    _LOGGER.debug(
-                        "Poll result for %s: target=%.1f, current=%.1f, pos=%s",
-                        self.device_name,
-                        old.target_C or 0,
-                        old.current_C or 0,
-                        old.pos,
-                    )
-                    break  # Status poll succeeded
-                except Exception as err:
-                    last_error = err
-                    _LOGGER.debug(
-                        "Poll attempt %d/%d failed for %s: %s",
-                        attempt,
-                        MAX_RETRIES,
-                        self.device_name,
-                        err,
-                    )
+            # _refresh_ble_device raises ConnectionError when the current device
+            # reference points at the wrong proxy — skip the attempt in that case
+            # rather than waste time on a connection that will fail auth.
+            try:
+                self._refresh_ble_device()
+            except ConnectionError as err:
+                last_error = err
+                _LOGGER.debug(
+                    "Poll attempt %d/%d skipped for %s: %s",
+                    attempt,
+                    MAX_RETRIES,
+                    self.device_name,
+                    err,
+                )
+            else:
+                # Wait indefinitely for the per-proxy semaphore.  Skipping a poll
+                # (returning early) resets the base class poll timer, which would
+                # delay the next attempt by a full POLL_INTERVAL – causing the
+                # valve position to stay empty.  Waiting is safe: the disconnect
+                # timeout in shelly_ble.py bounds the worst-case lock hold time.
+                async with self._device_lock:
                     try:
-                        await self._client.disconnect()
-                    except Exception:
-                        pass
+                        async with _get_proxy_semaphore(self._resolve_proxy_source()):
+                            await self._client.connect()
+                            status = await self._client.async_get_status()
+                            await self._client.disconnect()
+
+                        # Merge new values into existing status, preserving previous
+                        # values for any fields that came back as None
+                        old = self.state.status
+                        if status.pos is not None:
+                            old.pos = status.pos
+                        if status.current_C is not None:
+                            old.current_C = status.current_C
+                        if status.target_C is not None:
+                            old.target_C = status.target_C
+                        if status.steps is not None:
+                            old.steps = status.steps
+                        old.not_calibrated = status.not_calibrated
+                        old.not_mounted = status.not_mounted
+                        old.battery_low = status.battery_low
+                        old.ext_temp_missing = status.ext_temp_missing
+                        if status.ext_temp_missing:
+                            # TRV has dropped the external temperature — reset the
+                            # keepalive timer so the next automation invocation
+                            # bypasses the delta check and resends immediately.
+                            _LOGGER.debug(
+                                "ext_temp_missing detected for %s — resetting ext temp timer",
+                                self.device_name,
+                            )
+                            self._last_ext_temp_time = 0
+                        old.boost_active = status.boost_active
+                        old.boost_started_at = status.boost_started_at
+                        old.boost_duration = status.boost_duration
+                        old.override_active = status.override_active
+                        old.override_started_at = status.override_started_at
+                        old.override_duration = status.override_duration
+
+                        self.state.last_rpc_poll = time.time()
+                        _LOGGER.debug(
+                            "Poll result for %s: target=%.1f, current=%.1f, pos=%s",
+                            self.device_name,
+                            old.target_C or 0,
+                            old.current_C or 0,
+                            old.pos,
+                        )
+                        break  # Status poll succeeded
+                    except Exception as err:
+                        last_error = err
+                        _LOGGER.debug(
+                            "Poll attempt %d/%d failed for %s: %s",
+                            attempt,
+                            MAX_RETRIES,
+                            self.device_name,
+                            err,
+                        )
+                        try:
+                            await self._client.disconnect()
+                        except Exception:
+                            pass
 
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
@@ -359,12 +372,23 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                     self._client.set_ble_device(sd.ble_device)
                     return
             # Preferred proxy has no recent advertisement for this device.
-            # Keep the existing device reference (last known via the correct
-            # proxy) and let the connection attempt fail cleanly rather than
-            # silently routing through a different proxy that cannot authenticate.
-            _LOGGER.warning(
+            # Check whether the current device reference is already pointing at
+            # the correct proxy.  If it is, keep it and attempt the connection
+            # (the proxy may still be able to reach the device).  If it points
+            # at a different proxy, raise immediately so the retry loop skips
+            # this attempt rather than wasting 8–20 s on a proxy that will
+            # either fail auth (error 19) or time out.
+            current_source = self._client.ble_device_source
+            if current_source is not None and current_source != self._preferred_proxy:
+                raise ConnectionError(
+                    f"Preferred proxy {self._preferred_proxy} has no recent "
+                    f"advertisement for {self.device_name} and current device "
+                    f"reference is from {current_source} — skipping attempt to "
+                    f"avoid wrong-proxy connection"
+                )
+            _LOGGER.debug(
                 "Preferred proxy %s has no recent advertisement for %s "
-                "— keeping existing device reference, skipping fallback",
+                "— keeping existing device reference",
                 self._preferred_proxy,
                 self.device_name,
             )
@@ -398,88 +422,98 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         )
         last_error = None
         for attempt in range(1, MAX_RETRIES + 1):
-            self._refresh_ble_device()
-
-            async with self._device_lock:
-                proxy_sem = _get_proxy_semaphore(self._resolve_proxy_source())
-                try:
-                    await asyncio.wait_for(
-                        proxy_sem.acquire(), timeout=CMD_LOCK_TIMEOUT
-                    )
-                except asyncio.TimeoutError:
-                    _LOGGER.warning(
-                        "BLE proxy busy for >%.0fs, cannot set target temperature for %s",
-                        CMD_LOCK_TIMEOUT,
-                        self.device_name,
-                    )
-                    return False
-
-                try:
-                    # Connection 1: send the set command
-                    await self._client.connect()
-                    await self._client.async_rpc_call(
-                        "TRV.SetTarget", {"id": 0, "target_C": target_c}
-                    )
-                    await self._client.disconnect()
-
-                    # Wait for the TRV to apply the new target before reading back
-                    await asyncio.sleep(verify_delay)
-
-                    # Connection 2: read back status to verify (separate connection
-                    # required — two RPCs in one connection corrupt the response via
-                    # stale RX_CTL response_length)
-                    self._refresh_ble_device()
-                    await self._client.connect()
-                    status = await self._client.async_get_status()
-                    await self._client.disconnect()
-
-                    if (
-                        status.target_C is not None
-                        and abs(status.target_C - target_c) < 0.1
-                    ):
-                        # Update state with verified values
-                        self.state.status.target_C = status.target_C
-                        self.state.bthome.target_temperature = status.target_C
-                        if status.pos is not None:
-                            self.state.status.pos = status.pos
-                        if status.current_C is not None:
-                            self.state.status.current_C = status.current_C
-                        self.state.last_rpc_poll = time.time()
-                        self.async_update_listeners()
-                        _LOGGER.info(
-                            "Target temperature verified for %s: %.1f°C "
-                            "(attempt %d/%d)",
+            try:
+                self._refresh_ble_device()
+            except ConnectionError as err:
+                last_error = err
+                _LOGGER.warning(
+                    "Set target verified attempt %d/%d skipped for %s: %s",
+                    attempt,
+                    MAX_RETRIES,
+                    self.device_name,
+                    err,
+                )
+            else:
+                async with self._device_lock:
+                    proxy_sem = _get_proxy_semaphore(self._resolve_proxy_source())
+                    try:
+                        await asyncio.wait_for(
+                            proxy_sem.acquire(), timeout=CMD_LOCK_TIMEOUT
+                        )
+                    except asyncio.TimeoutError:
+                        _LOGGER.warning(
+                            "BLE proxy busy for >%.0fs, cannot set target temperature for %s",
+                            CMD_LOCK_TIMEOUT,
                             self.device_name,
-                            status.target_C,
+                        )
+                        return False
+
+                    try:
+                        # Connection 1: send the set command
+                        await self._client.connect()
+                        await self._client.async_rpc_call(
+                            "TRV.SetTarget", {"id": 0, "target_C": target_c}
+                        )
+                        await self._client.disconnect()
+
+                        # Wait for the TRV to apply the new target before reading back
+                        await asyncio.sleep(verify_delay)
+
+                        # Connection 2: read back status to verify (separate connection
+                        # required — two RPCs in one connection corrupt the response via
+                        # stale RX_CTL response_length)
+                        self._refresh_ble_device()
+                        await self._client.connect()
+                        status = await self._client.async_get_status()
+                        await self._client.disconnect()
+
+                        if (
+                            status.target_C is not None
+                            and abs(status.target_C - target_c) < 0.1
+                        ):
+                            # Update state with verified values
+                            self.state.status.target_C = status.target_C
+                            self.state.bthome.target_temperature = status.target_C
+                            if status.pos is not None:
+                                self.state.status.pos = status.pos
+                            if status.current_C is not None:
+                                self.state.status.current_C = status.current_C
+                            self.state.last_rpc_poll = time.time()
+                            self.async_update_listeners()
+                            _LOGGER.info(
+                                "Target temperature verified for %s: %.1f°C "
+                                "(attempt %d/%d)",
+                                self.device_name,
+                                status.target_C,
+                                attempt,
+                                MAX_RETRIES,
+                            )
+                            return True
+
+                        _LOGGER.warning(
+                            "Target temperature mismatch for %s: "
+                            "requested=%.1f, got=%.1f (attempt %d/%d)",
+                            self.device_name,
+                            target_c,
+                            status.target_C or 0,
                             attempt,
                             MAX_RETRIES,
                         )
-                        return True
-
-                    _LOGGER.warning(
-                        "Target temperature mismatch for %s: "
-                        "requested=%.1f, got=%.1f (attempt %d/%d)",
-                        self.device_name,
-                        target_c,
-                        status.target_C or 0,
-                        attempt,
-                        MAX_RETRIES,
-                    )
-                except Exception as err:
-                    last_error = err
-                    _LOGGER.warning(
-                        "Set target verified attempt %d/%d failed for %s: %s",
-                        attempt,
-                        MAX_RETRIES,
-                        self.device_name,
-                        err,
-                    )
-                    try:
-                        await self._client.disconnect()
-                    except Exception:
-                        pass
-                finally:
-                    proxy_sem.release()
+                    except Exception as err:
+                        last_error = err
+                        _LOGGER.warning(
+                            "Set target verified attempt %d/%d failed for %s: %s",
+                            attempt,
+                            MAX_RETRIES,
+                            self.device_name,
+                            err,
+                        )
+                        try:
+                            await self._client.disconnect()
+                        except Exception:
+                            pass
+                    finally:
+                        proxy_sem.release()
 
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
@@ -578,45 +612,58 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         """
         last_error = None
         for attempt in range(1, MAX_RETRIES + 1):
-            # Get fresh BLE device reference before each attempt
-            self._refresh_ble_device()
-
-            async with self._device_lock:
-                proxy_sem = _get_proxy_semaphore(self._resolve_proxy_source())
-                try:
-                    await asyncio.wait_for(
-                        proxy_sem.acquire(), timeout=CMD_LOCK_TIMEOUT
-                    )
-                except asyncio.TimeoutError:
-                    _LOGGER.warning(
-                        "BLE proxy busy for >%.0fs, cannot execute %s for %s",
-                        CMD_LOCK_TIMEOUT,
-                        method,
-                        self.device_name,
-                    )
-                    return COMMAND_FAILED
-
-                try:
-                    await self._client.connect()
-                    result = await self._client.async_rpc_call(method, params)
-                    await self._client.disconnect()
-                    return result
-                except Exception as err:
-                    last_error = err
-                    _LOGGER.warning(
-                        "RPC %s attempt %d/%d failed for %s: %s",
-                        method,
-                        attempt,
-                        MAX_RETRIES,
-                        self.device_name,
-                        err,
-                    )
+            # Get fresh BLE device reference before each attempt.
+            # Raises ConnectionError when the current device reference points at
+            # the wrong proxy — skip rather than waste time on a doomed attempt.
+            try:
+                self._refresh_ble_device()
+            except ConnectionError as err:
+                last_error = err
+                _LOGGER.warning(
+                    "RPC %s attempt %d/%d skipped for %s: %s",
+                    method,
+                    attempt,
+                    MAX_RETRIES,
+                    self.device_name,
+                    err,
+                )
+            else:
+                async with self._device_lock:
+                    proxy_sem = _get_proxy_semaphore(self._resolve_proxy_source())
                     try:
+                        await asyncio.wait_for(
+                            proxy_sem.acquire(), timeout=CMD_LOCK_TIMEOUT
+                        )
+                    except asyncio.TimeoutError:
+                        _LOGGER.warning(
+                            "BLE proxy busy for >%.0fs, cannot execute %s for %s",
+                            CMD_LOCK_TIMEOUT,
+                            method,
+                            self.device_name,
+                        )
+                        return COMMAND_FAILED
+
+                    try:
+                        await self._client.connect()
+                        result = await self._client.async_rpc_call(method, params)
                         await self._client.disconnect()
-                    except Exception:
-                        pass
-                finally:
-                    proxy_sem.release()
+                        return result
+                    except Exception as err:
+                        last_error = err
+                        _LOGGER.warning(
+                            "RPC %s attempt %d/%d failed for %s: %s",
+                            method,
+                            attempt,
+                            MAX_RETRIES,
+                            self.device_name,
+                            err,
+                        )
+                        try:
+                            await self._client.disconnect()
+                        except Exception:
+                            pass
+                    finally:
+                        proxy_sem.release()
 
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
