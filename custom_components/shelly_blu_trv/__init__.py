@@ -5,7 +5,10 @@ from __future__ import annotations
 import logging
 
 from bleak import BleakError
-from homeassistant.components.bluetooth import async_ble_device_from_address
+from homeassistant.components.bluetooth import (
+    async_ble_device_from_address,
+    async_scanner_devices_by_address,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
@@ -33,8 +36,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     _LOGGER.debug("Setting up Shelly BLU TRV: %s (%s)", device_name, address)
 
-    # Find the BLE device
-    ble_device = async_ble_device_from_address(hass, address, connectable=True)
+    # Find the BLE device, preferring the configured preferred proxy so that
+    # the initial device reference already points at the correct proxy rather
+    # than whatever proxy most recently cached an advertisement.
+    preferred_proxy = entry.options.get(CONF_PREFERRED_PROXY)
+    ble_device = None
+    if preferred_proxy:
+        for sd in async_scanner_devices_by_address(hass, address, connectable=True):
+            if sd.scanner.source == preferred_proxy:
+                ble_device = sd.ble_device
+                break
+    if ble_device is None:
+        ble_device = async_ble_device_from_address(hass, address, connectable=True)
     if ble_device is None:
         raise ConfigEntryNotReady(
             f"Could not find Shelly BLU TRV {device_name} ({address}). "
@@ -48,7 +61,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         device_name=device_name,
         model=model,
         firmware=firmware,
-        preferred_proxy=entry.options.get(CONF_PREFERRED_PROXY),
+        preferred_proxy=preferred_proxy,
     )
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
