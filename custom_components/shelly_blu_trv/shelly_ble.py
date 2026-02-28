@@ -284,6 +284,19 @@ class ShellyBluTrvBleClient:
 
         _LOGGER.debug("Connecting to %s via %s", self._address, self._proxy_source())
 
+        # Fail fast if the BLE device's source disagrees with the configured
+        # proxy hint.  service_info.device in HA's BT stack can be a merged
+        # "best device" object whose details["source"] points at a different
+        # proxy than the one that actually triggered the callback.  If that
+        # slips through our coordinator filtering we'd waste 8–20 s on a
+        # connection that will either time out or fail authentication.
+        device_source = self._ble_device.details.get("source") if self._ble_device else None
+        if device_source and self._source_hint and device_source != self._source_hint:
+            raise ConnectionError(
+                f"BLE device for {self._address} has source {device_source} "
+                f"but proxy hint is {self._source_hint} — refusing wrong-proxy connection"
+            )
+
         # Snapshot the BLE device and pass it as ble_device_callback so that
         # establish_connection always uses the preferred-proxy device regardless
         # of how many internal retry attempts it makes.  Without this, HA's

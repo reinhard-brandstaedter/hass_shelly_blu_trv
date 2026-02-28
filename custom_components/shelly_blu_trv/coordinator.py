@@ -288,12 +288,16 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         """Handle a bluetooth event (advertisement received)."""
         # Only update the device reference when this advertisement arrived via
         # the preferred proxy (or when no preferred proxy is configured).
-        # Advertisements from other proxies must not silently replace the
-        # device reference — doing so causes the next connection attempt to
-        # route through the wrong proxy, breaking bonded TRVs.
+        # Guard also on service_info.device.details["source"]: HA may supply a
+        # "merged/best" BLEDevice whose source differs from service_info.source
+        # (the scanner that actually received the ad).  Updating _ble_device with
+        # such a merged device silently corrupts our proxy reference.
         if not self._preferred_proxy or service_info.source == self._preferred_proxy:
-            self.ble_device = service_info.device
-            self._client.set_ble_device(service_info.device, rssi=service_info.rssi)
+            device = service_info.device
+            device_source = device.details.get("source") if device else None
+            if not self._preferred_proxy or device_source == self._preferred_proxy:
+                self.ble_device = device
+                self._client.set_ble_device(device, rssi=service_info.rssi)
 
         # Parse BTHome advertisement data
         bthome = parse_bthome_advertisement(
