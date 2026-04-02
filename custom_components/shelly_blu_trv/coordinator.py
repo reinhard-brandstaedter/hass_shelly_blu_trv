@@ -70,6 +70,28 @@ def _get_proxy_semaphore(proxy_source: str | None) -> asyncio.Semaphore:
 COMMAND_FAILED = object()
 
 
+def _is_auth_error(err: Exception) -> bool:
+    """Return True when *err* is a BLE authentication / bonding failure (error 19).
+
+    The TRV terminates connections from proxies it is not bonded to with HCI
+    error 0x13 (decimal 19, "Remote User Terminated Connection").  On Linux /
+    BlueZ this surfaces as an OSError with errno 19 (ENODEV), a BleakError
+    whose message contains "error 19", or an "Authentication" failure string.
+
+    Each rejected attempt adds a stale entry to the TRV's fixed-size bond
+    table, so the retry loop must stop as soon as it sees this error.
+    """
+    if isinstance(err, OSError) and err.errno == 19:
+        return True
+    msg = str(err).lower()
+    return (
+        "error 19" in msg
+        or "[errno 19]" in msg
+        or "authentication" in msg
+        or "unauthoriz" in msg
+    )
+
+
 class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
     """Coordinator for Shelly BLU TRV device data."""
 
@@ -110,6 +132,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         self._preferred_proxy: str | None = preferred_proxy
         self._last_ext_temp_sent: float | None = None
         self._last_ext_temp_time: float = 0
+        self._auth_failed: bool = False  # set on error 19; blocks all retries for this session
 
     @property
     def client(self) -> ShellyBluTrvBleClient:
@@ -144,6 +167,13 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
             self._client.set_ble_device(service_info.device, rssi=service_info.rssi)
 
         # --- Status poll (TRV.GetStatus) ---
+        if self._auth_failed:
+            _LOGGER.debug(
+                "Skipping poll for %s: auth failure (error 19) already seen this session",
+                self.device_name,
+            )
+            return
+
         last_error = None
         for attempt in range(1, MAX_RETRIES + 1):
             # Always refresh the BLE device reference before each attempt.
@@ -230,6 +260,14 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                             await self._client.disconnect()
                         except Exception:
                             pass
+                        if _is_auth_error(err):
+                            self._auth_failed = True
+                            _LOGGER.warning(
+                                "Auth failure (error 19) polling %s — "
+                                "will not retry this session to protect bond table",
+                                self.device_name,
+                            )
+                            return
 
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
@@ -419,6 +457,14 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
 
         Returns True if verified, False if all attempts failed.
         """
+        if self._auth_failed:
+            _LOGGER.warning(
+                "Cannot set target temperature for %s: "
+                "auth failure (error 19) already seen this session",
+                self.device_name,
+            )
+            return False
+
         _LOGGER.info(
             "Setting target temperature for %s to %.1f°C",
             self.device_name,
@@ -516,8 +562,18 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                             await self._client.disconnect()
                         except Exception:
                             pass
+                        if _is_auth_error(err):
+                            self._auth_failed = True
+                            _LOGGER.warning(
+                                "Auth failure (error 19) setting target for %s — "
+                                "will not retry this session to protect bond table",
+                                self.device_name,
+                            )
                     finally:
                         proxy_sem.release()
+
+                    if self._auth_failed:
+                        return False
 
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
@@ -614,6 +670,15 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         Connection failures are logged but not raised for non-critical
         commands to avoid crashing the websocket API.
         """
+        if self._auth_failed:
+            _LOGGER.warning(
+                "Cannot execute RPC %s for %s: "
+                "auth failure (error 19) already seen this session",
+                method,
+                self.device_name,
+            )
+            return COMMAND_FAILED
+
         last_error = None
         for attempt in range(1, MAX_RETRIES + 1):
             # Get fresh BLE device reference before each attempt.
@@ -666,8 +731,19 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                             await self._client.disconnect()
                         except Exception:
                             pass
+                        if _is_auth_error(err):
+                            self._auth_failed = True
+                            _LOGGER.warning(
+                                "Auth failure (error 19) executing RPC %s for %s — "
+                                "will not retry this session to protect bond table",
+                                method,
+                                self.device_name,
+                            )
                     finally:
                         proxy_sem.release()
+
+                    if self._auth_failed:
+                        return COMMAND_FAILED
 
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(RETRY_DELAY)
