@@ -147,6 +147,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         self._last_ext_temp_sent: float | None = None
         self._last_ext_temp_time: float = 0
         self._auth_failed_at: float = 0  # epoch time of last auth failure; 0 = never
+        self._probe_in_progress: bool = False  # blocks polls while startup probe runs
 
     @property
     def client(self) -> ShellyBluTrvBleClient:
@@ -160,6 +161,8 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         seconds_since_last_poll: float | None,
     ) -> bool:
         """Determine if we need to poll the device for full status."""
+        if self._probe_in_progress:
+            return False  # don't race with the startup probe for _device_lock
         if seconds_since_last_poll is None:
             return True
         return seconds_since_last_poll >= POLL_INTERVAL
@@ -407,49 +410,57 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
     async def async_startup_probe(self) -> None:
         """Attempt a single BLE connection immediately after setup.
 
-        This gives the TRV a chance to complete bonding without waiting for
-        the first advertisement-triggered poll (which can take 60-90 s).
+        Gives the TRV a chance to complete bonding within its 30-second pairing
+        window without waiting for the first advertisement-triggered poll
+        (which queues behind other TRVs' polls for the shared proxy semaphore
+        and can take 60-150 s when multiple TRVs start simultaneously).
+
+        Critically, this probe bypasses the proxy semaphore so it is not
+        blocked by other TRVs' long connection attempts.  _probe_in_progress
+        prevents this TRV's own advertisement-triggered poll from racing for
+        _device_lock at the same time.
 
         Pairing flow:
           1. Put TRV in pairing mode (30 s window).
-          2. Save integration options → reload → this probe fires within ~2 s.
+          2. Save integration options → probe fires within ~2 s.
           3. Bonding completes; subsequent polls work normally.
-
-        If the connection fails with error 19 the auth backoff is set, just
-        as in the normal retry path.  Saving options again resets it.
         """
+        self._probe_in_progress = True
         _LOGGER.debug("Startup probe: attempting connection to %s", self.device_name)
         try:
-            self._refresh_ble_device()
-        except ConnectionError as err:
-            _LOGGER.debug("Startup probe skipped for %s: %s", self.device_name, err)
-            return
-
-        async with self._device_lock:
             try:
-                async with _get_proxy_semaphore(self._resolve_proxy_source()):
+                self._refresh_ble_device()
+            except ConnectionError as err:
+                _LOGGER.debug("Startup probe skipped for %s: %s", self.device_name, err)
+                return
+
+            async with self._device_lock:
+                # Intentionally bypass the proxy semaphore: the probe must connect
+                # within the TRV's 30-second pairing window and cannot afford to
+                # wait behind other TRVs' long connection attempts (each can take
+                # 60-90 s holding a semaphore slot).  The probe is a short single
+                # connect/disconnect so the brief slot overrun is harmless.
+                try:
                     await self._client.connect()
                     await self._client.disconnect()
-                    _LOGGER.debug(
-                        "Startup probe succeeded for %s", self.device_name
-                    )
-            except Exception as err:
-                _LOGGER.debug(
-                    "Startup probe failed for %s: %s", self.device_name, err
-                )
-                try:
-                    await self._client.disconnect()
-                except Exception:
-                    pass
-                if _is_auth_error(err):
-                    self._auth_failed_at = time.time()
-                    _LOGGER.warning(
-                        "Auth failure (error 19) on startup probe for %s — "
-                        "backing off for %d min to protect bond table. "
-                        "Put TRV in pairing mode then save integration options to retry.",
-                        self.device_name,
-                        AUTH_RETRY_INTERVAL // 60,
-                    )
+                    _LOGGER.debug("Startup probe succeeded for %s", self.device_name)
+                except Exception as err:
+                    _LOGGER.debug("Startup probe failed for %s: %s", self.device_name, err)
+                    try:
+                        await self._client.disconnect()
+                    except Exception:
+                        pass
+                    if _is_auth_error(err):
+                        self._auth_failed_at = time.time()
+                        _LOGGER.warning(
+                            "Auth failure (error 19) on startup probe for %s — "
+                            "backing off for %d min to protect bond table. "
+                            "Put TRV in pairing mode then save integration options to retry.",
+                            self.device_name,
+                            AUTH_RETRY_INTERVAL // 60,
+                        )
+        finally:
+            self._probe_in_progress = False
 
     def _resolve_proxy_source(self) -> str | None:
         """Return the BT proxy source string used for semaphore selection.
