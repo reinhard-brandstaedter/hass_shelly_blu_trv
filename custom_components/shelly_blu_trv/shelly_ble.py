@@ -242,6 +242,11 @@ class ShellyBluTrvBleClient:
         return self._address
 
     @property
+    def ble_device(self) -> BLEDevice | None:
+        """Return the current BLE device reference."""
+        return self._ble_device
+
+    @property
     def ble_device_source(self) -> str | None:
         """Return the source (proxy address) of the current BLE device reference."""
         if self._ble_device is None:

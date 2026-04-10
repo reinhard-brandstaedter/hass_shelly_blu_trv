@@ -7,7 +7,9 @@ import logging
 import time
 from typing import Any
 
+from bleak import BleakClient
 from bleak.backends.device import BLEDevice
+from bleak_retry_connector import establish_connection
 from homeassistant.components.bluetooth import (
     BluetoothScannerDevice,
     BluetoothServiceInfoBleak,
@@ -266,6 +268,9 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                             old.current_C or 0,
                             old.pos,
                         )
+                        # Successful connection — clear any auth backoff so
+                        # follow-up RPCs (Trv.GetConfig, ext temp) are not blocked.
+                        self._auth_failed_at = 0
                         break  # Status poll succeeded
                     except Exception as err:
                         last_error = err
@@ -411,14 +416,18 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         """Attempt a single BLE connection immediately after setup.
 
         Gives the TRV a chance to complete bonding within its 30-second pairing
-        window without waiting for the first advertisement-triggered poll
-        (which queues behind other TRVs' polls for the shared proxy semaphore
-        and can take 60-150 s when multiple TRVs start simultaneously).
+        window.  Uses a fresh BleakClient that is independent of self._client so
+        it never races with the concurrent advertisement-triggered poll for
+        _device_lock.  The poll also connects in parallel — whichever arrives
+        first while the TRV is in pairing mode completes the bonding.
 
-        Critically, this probe bypasses the proxy semaphore so it is not
-        blocked by other TRVs' long connection attempts.  _probe_in_progress
-        prevents this TRV's own advertisement-triggered poll from racing for
-        _device_lock at the same time.
+        Intentionally does NOT set _auth_failed_at on failure: the probe runs
+        concurrently with the regular poll, and setting the backoff here would
+        block the poll from succeeding even if it connects after the probe fails.
+        The poll is responsible for setting _auth_failed_at on repeated failures.
+
+        _probe_in_progress suppresses subsequent advertisement-triggered polls
+        while the probe is still running so they don't pile up.
 
         Pairing flow:
           1. Put TRV in pairing mode (30 s window).
@@ -434,31 +443,24 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                 _LOGGER.debug("Startup probe skipped for %s: %s", self.device_name, err)
                 return
 
-            async with self._device_lock:
-                # Intentionally bypass the proxy semaphore: the probe must connect
-                # within the TRV's 30-second pairing window and cannot afford to
-                # wait behind other TRVs' long connection attempts (each can take
-                # 60-90 s holding a semaphore slot).  The probe is a short single
-                # connect/disconnect so the brief slot overrun is harmless.
-                try:
-                    await self._client.connect()
-                    await self._client.disconnect()
-                    _LOGGER.debug("Startup probe succeeded for %s", self.device_name)
-                except Exception as err:
-                    _LOGGER.debug("Startup probe failed for %s: %s", self.device_name, err)
-                    try:
-                        await self._client.disconnect()
-                    except Exception:
-                        pass
-                    if _is_auth_error(err):
-                        self._auth_failed_at = time.time()
-                        _LOGGER.warning(
-                            "Auth failure (error 19) on startup probe for %s — "
-                            "backing off for %d min to protect bond table. "
-                            "Put TRV in pairing mode then save integration options to retry.",
-                            self.device_name,
-                            AUTH_RETRY_INTERVAL // 60,
-                        )
+            ble_device = self._client.ble_device
+            if ble_device is None:
+                return
+
+            # Use a fresh BleakClient — never touches self._client state so the
+            # concurrent poll can connect independently without any lock contention.
+            try:
+                client = await establish_connection(
+                    BleakClient,
+                    ble_device,
+                    self._address,
+                    max_attempts=1,
+                    ble_device_callback=lambda: ble_device,
+                )
+                await client.disconnect()
+                _LOGGER.debug("Startup probe succeeded for %s", self.device_name)
+            except Exception as err:
+                _LOGGER.debug("Startup probe failed for %s: %s", self.device_name, err)
         finally:
             self._probe_in_progress = False
 
