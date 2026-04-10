@@ -83,9 +83,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     entry.async_on_unload(coordinator.async_start())
 
+    # Fire an immediate connection attempt so that BLE bonding can complete
+    # within the TRV's 30-second pairing window without waiting for the first
+    # advertisement-triggered poll (which can take 60-90 s).
+    # Pairing flow: put TRV in pairing mode → save integration options →
+    # this probe fires within ~2 s of the reload → bonding completes.
+    hass.async_create_task(coordinator.async_startup_probe())
+
     async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Apply updated options to the running coordinator without reloading."""
         coordinator.set_preferred_proxy(entry.options.get(CONF_PREFERRED_PROXY))
+        hass.async_create_task(coordinator.async_startup_probe())
 
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 

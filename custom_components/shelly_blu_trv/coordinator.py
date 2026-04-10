@@ -404,6 +404,53 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
             proxy_source or "auto",
         )
 
+    async def async_startup_probe(self) -> None:
+        """Attempt a single BLE connection immediately after setup.
+
+        This gives the TRV a chance to complete bonding without waiting for
+        the first advertisement-triggered poll (which can take 60-90 s).
+
+        Pairing flow:
+          1. Put TRV in pairing mode (30 s window).
+          2. Save integration options → reload → this probe fires within ~2 s.
+          3. Bonding completes; subsequent polls work normally.
+
+        If the connection fails with error 19 the auth backoff is set, just
+        as in the normal retry path.  Saving options again resets it.
+        """
+        _LOGGER.debug("Startup probe: attempting connection to %s", self.device_name)
+        try:
+            self._refresh_ble_device()
+        except ConnectionError as err:
+            _LOGGER.debug("Startup probe skipped for %s: %s", self.device_name, err)
+            return
+
+        async with self._device_lock:
+            try:
+                async with _get_proxy_semaphore(self._resolve_proxy_source()):
+                    await self._client.connect()
+                    await self._client.disconnect()
+                    _LOGGER.debug(
+                        "Startup probe succeeded for %s", self.device_name
+                    )
+            except Exception as err:
+                _LOGGER.debug(
+                    "Startup probe failed for %s: %s", self.device_name, err
+                )
+                try:
+                    await self._client.disconnect()
+                except Exception:
+                    pass
+                if _is_auth_error(err):
+                    self._auth_failed_at = time.time()
+                    _LOGGER.warning(
+                        "Auth failure (error 19) on startup probe for %s — "
+                        "backing off for %d min to protect bond table. "
+                        "Put TRV in pairing mode then save integration options to retry.",
+                        self.device_name,
+                        AUTH_RETRY_INTERVAL // 60,
+                    )
+
     def _resolve_proxy_source(self) -> str | None:
         """Return the BT proxy source string used for semaphore selection.
 
