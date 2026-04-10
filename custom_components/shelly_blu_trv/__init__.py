@@ -48,17 +48,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 break
     if ble_device is None:
         if preferred_proxy:
-            # Never fall back to a different proxy when a preferred one is
-            # configured — the TRV is bonded exclusively to that proxy, and
-            # async_ble_device_from_address() may return a merged/cached
-            # BLEDevice from a different proxy (e.g. a previously-bonded one)
-            # whose details["source"] is missing or wrong.  Starting with the
-            # wrong device bypasses all subsequent source guards and causes
-            # failed connections through the wrong proxy at runtime.
-            raise ConfigEntryNotReady(
-                f"Preferred proxy {preferred_proxy} has not seen "
-                f"{device_name} ({address}) recently. "
-                "Ensure the proxy is online and in range, then restart."
+            # Preferred proxy hasn't seen this device recently (TRV asleep or
+            # just reloading after options save).  Fall back to any cached
+            # BLEDevice so the coordinator can start; the wrong-proxy guards in
+            # _refresh_ble_device() and connect() will prevent any actual
+            # connection through the wrong proxy.  The startup probe will fire
+            # once a device from the correct proxy appears.
+            _LOGGER.debug(
+                "Preferred proxy %s has no recent advertisement for %s (%s); "
+                "starting with any available device reference",
+                preferred_proxy,
+                device_name,
+                address,
             )
         ble_device = async_ble_device_from_address(hass, address, connectable=True)
     if ble_device is None:
