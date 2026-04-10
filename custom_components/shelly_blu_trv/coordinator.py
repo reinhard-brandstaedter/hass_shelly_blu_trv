@@ -74,9 +74,14 @@ def _is_auth_error(err: Exception) -> bool:
     """Return True when *err* is a BLE authentication / bonding failure (error 19).
 
     The TRV terminates connections from proxies it is not bonded to with HCI
-    error 0x13 (decimal 19, "Remote User Terminated Connection").  On Linux /
-    BlueZ this surfaces as an OSError with errno 19 (ENODEV), a BleakError
-    whose message contains "error 19", or an "Authentication" failure string.
+    error 0x13 (decimal 19, "Remote User Terminated Connection").  This
+    surfaces differently depending on the BT backend:
+
+    - Linux/BlueZ:    OSError errno 19, or message contains "error 19" /
+                      "[errno 19]" / "authentication" / "unauthoriz"
+    - ESPHome proxy:  "ESP_GATT_CONN_TERMINATE_PEER_USER" or
+                      "Unknown error (19)" (with parentheses, from GATT
+                      service-discovery and write-response failures)
 
     Each rejected attempt adds a stale entry to the TRV's fixed-size bond
     table, so the retry loop must stop as soon as it sees this error.
@@ -87,6 +92,8 @@ def _is_auth_error(err: Exception) -> bool:
     return (
         "error 19" in msg
         or "[errno 19]" in msg
+        or "unknown error (19)" in msg
+        or "terminate_peer_user" in msg
         or "authentication" in msg
         or "unauthoriz" in msg
     )
@@ -421,7 +428,10 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
             # this attempt rather than wasting 8–20 s on a proxy that will
             # either fail auth (error 19) or time out.
             current_source = self._client.ble_device_source
-            if current_source is not None and current_source != self._preferred_proxy:
+            if current_source != self._preferred_proxy:
+                # Also catches current_source is None (merged/no-source device
+                # from async_ble_device_from_address) — don't treat an unknown
+                # source as safe just because it isn't explicitly wrong.
                 raise ConnectionError(
                     f"Preferred proxy {self._preferred_proxy} has no recent "
                     f"advertisement for {self.device_name} and current device "

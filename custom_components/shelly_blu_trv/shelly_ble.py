@@ -291,7 +291,7 @@ class ShellyBluTrvBleClient:
         # slips through our coordinator filtering we'd waste 8–20 s on a
         # connection that will either time out or fail authentication.
         device_source = self._ble_device.details.get("source") if self._ble_device else None
-        if device_source and self._source_hint and device_source != self._source_hint:
+        if self._source_hint and device_source != self._source_hint:
             raise ConnectionError(
                 f"BLE device for {self._address} has source {device_source} "
                 f"but proxy hint is {self._source_hint} — refusing wrong-proxy connection"

@@ -47,6 +47,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 ble_device = sd.ble_device
                 break
     if ble_device is None:
+        if preferred_proxy:
+            # Never fall back to a different proxy when a preferred one is
+            # configured — the TRV is bonded exclusively to that proxy, and
+            # async_ble_device_from_address() may return a merged/cached
+            # BLEDevice from a different proxy (e.g. a previously-bonded one)
+            # whose details["source"] is missing or wrong.  Starting with the
+            # wrong device bypasses all subsequent source guards and causes
+            # failed connections through the wrong proxy at runtime.
+            raise ConfigEntryNotReady(
+                f"Preferred proxy {preferred_proxy} has not seen "
+                f"{device_name} ({address}) recently. "
+                "Ensure the proxy is online and in range, then restart."
+            )
         ble_device = async_ble_device_from_address(hass, address, connectable=True)
     if ble_device is None:
         raise ConfigEntryNotReady(
