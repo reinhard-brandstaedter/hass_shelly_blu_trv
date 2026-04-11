@@ -458,7 +458,19 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                     ble_device_callback=lambda: ble_device,
                 )
                 await client.disconnect()
-                _LOGGER.debug("Startup probe succeeded for %s", self.device_name)
+                # Probe connected cleanly — bonding is either already established
+                # or just completed (TRV was in pairing mode).  Clear any stale
+                # auth-failure backoff so the next advertisement triggers a fresh
+                # poll instead of waiting 30 min.  The poll will immediately
+                # confirm whether bonding actually succeeded.
+                if self._auth_failed_at:
+                    _LOGGER.debug(
+                        "Startup probe succeeded for %s — clearing auth backoff",
+                        self.device_name,
+                    )
+                    self._auth_failed_at = 0
+                else:
+                    _LOGGER.debug("Startup probe succeeded for %s", self.device_name)
             except Exception as err:
                 _LOGGER.debug("Startup probe failed for %s: %s", self.device_name, err)
         finally:
