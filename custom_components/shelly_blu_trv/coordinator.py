@@ -453,7 +453,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                 client = await establish_connection(
                     BleakClient,
                     ble_device,
-                    self._address,
+                    self._client.address,
                     max_attempts=1,
                     ble_device_callback=lambda: ble_device,
                 )
@@ -498,10 +498,23 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
             for sd in async_scanner_devices_by_address(
                 self.hass, self._client.address, connectable=True
             ):
-                if sd.scanner.source == self._preferred_proxy:
-                    self.ble_device = sd.ble_device
-                    self._client.set_ble_device(sd.ble_device)
-                    return
+                if sd.scanner.source != self._preferred_proxy:
+                    continue
+                # Also verify the BLEDevice itself points at the right proxy.
+                # HA may supply a merged/cached BLEDevice whose details["source"]
+                # differs from the scanner source — using it would route through
+                # the wrong proxy and fail auth.
+                device_source = sd.ble_device.details.get("source") if sd.ble_device else None
+                if device_source != self._preferred_proxy:
+                    _LOGGER.debug(
+                        "Skipping sd from %s: ble_device.details['source']=%s (merged/stale)",
+                        sd.scanner.source,
+                        device_source,
+                    )
+                    continue
+                self.ble_device = sd.ble_device
+                self._client.set_ble_device(sd.ble_device)
+                return
             # Preferred proxy has no recent advertisement for this device.
             # Check whether the current device reference is already pointing at
             # the correct proxy.  If it is, keep it and attempt the connection
