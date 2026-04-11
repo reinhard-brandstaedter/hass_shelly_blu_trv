@@ -444,12 +444,14 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
             try:
                 async with semaphore:
                     async with self._device_lock:
-                        # connect() runs _refresh_ble_device() and the source-hint
-                        # guard, which rejects connections through the wrong proxy
-                        # (e.g. tempsensor-wz) before establish_connection is even
-                        # called.  Using raw establish_connection here bypassed those
-                        # guards and let bleak-retry-connector internally pick a
-                        # different proxy device.
+                        # _refresh_ble_device() sets the source hint and updates
+                        # the BLE device reference to the preferred proxy.  It
+                        # raises ConnectionError if no valid device is available,
+                        # which is caught below.  connect() then enforces the
+                        # source-hint guard before calling establish_connection,
+                        # preventing bleak-retry-connector from falling back to
+                        # the wrong proxy (e.g. tempsensor-wz).
+                        self._refresh_ble_device()
                         await self._client.connect()
                         await self._client.disconnect()
                 if self._auth_failed_at:
