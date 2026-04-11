@@ -10,7 +10,6 @@ import json
 import logging
 import struct
 import time
-import dataclasses
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -313,8 +312,13 @@ class ShellyBluTrvBleClient:
         # that the copy is always correct even if other detail fields change.
         _details = dict(self._ble_device.details) if isinstance(self._ble_device.details, dict) else self._ble_device.details
         if self._source_hint and isinstance(_details, dict):
-            _details = {**_details, "source": self._source_hint}
-        _device = dataclasses.replace(self._ble_device, details=_details)
+            _details["source"] = self._source_hint
+        _device = BLEDevice(
+            self._ble_device.address,
+            self._ble_device.name,
+            _details,
+            rssi=self._ble_device.rssi,
+        )
         self._client = await establish_connection(
             BleakClient,
             _device,
