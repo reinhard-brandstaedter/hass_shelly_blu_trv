@@ -36,7 +36,7 @@ from .shelly_ble import (
 
 _LOGGER = logging.getLogger(__name__)
 
-MAX_RETRIES = 3
+MAX_RETRIES = 2
 RETRY_DELAY = 10  # seconds between retries
 DEVICE_STARTUP_TIMEOUT = 300
 
@@ -53,11 +53,12 @@ CMD_LOCK_TIMEOUT = 120.0   # seconds: fail user command if BLE is busy
 # set_preferred_proxy() also resets the timer for the same reason.
 AUTH_RETRY_INTERVAL = 1800  # 30 minutes
 
-# Per-proxy semaphore pool – allows up to PROXY_SLOTS simultaneous BLE
-# connections through the same BT proxy while letting TRVs on different
-# proxies connect fully in parallel.  ESP32C3 proxies have 3 slots; we
-# reserve one for other HA bluetooth activity, leaving 2 for ourselves.
-PROXY_SLOTS = 2
+# Per-proxy semaphore pool – serialises BLE connections through the same
+# BT proxy while letting TRVs on different proxies connect in parallel.
+# PROXY_SLOTS=1: all 3 TRVs share one proxy; allowing 2 concurrent
+# connections caused proxy overload (20 s timeouts, cascading retries).
+# 3 polls × ~3 s each = ~9 s total, well within the 5-min poll interval.
+PROXY_SLOTS = 1
 _proxy_semaphores: dict[str, asyncio.Semaphore] = {}
 _fallback_semaphore = asyncio.Semaphore(1)  # conservative when proxy is unknown
 
