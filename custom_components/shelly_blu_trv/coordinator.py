@@ -447,17 +447,26 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
             if ble_device is None:
                 return
 
-            # Use a fresh BleakClient — never touches self._client state so the
-            # concurrent poll can connect independently without any lock contention.
+            # Use a fresh BleakClient — never touches self._client state.
+            # Acquire the per-proxy semaphore so that simultaneous startup
+            # probes from multiple TRVs (all on the same proxy) don't
+            # overwhelm the ESP32 BLE stack, which typically supports only
+            # 3 concurrent connections.  Without this guard, a reload with
+            # 3 TRVs fires 3 probes + 3 polls simultaneously → 6 connections
+            # → proxy drops connections mid-GATT-discovery → "Characteristic
+            # not found" errors.
+            proxy_source = self._resolve_proxy_source()
+            semaphore = _get_proxy_semaphore(proxy_source)
             try:
-                client = await establish_connection(
-                    BleakClient,
-                    ble_device,
-                    self._client.address,
-                    max_attempts=1,
-                    ble_device_callback=lambda: ble_device,
-                )
-                await client.disconnect()
+                async with semaphore:
+                    client = await establish_connection(
+                        BleakClient,
+                        ble_device,
+                        self._client.address,
+                        max_attempts=1,
+                        ble_device_callback=lambda: ble_device,
+                    )
+                    await client.disconnect()
                 # Probe connected cleanly — bonding is either already established
                 # or just completed (TRV was in pairing mode).  Clear any stale
                 # auth-failure backoff so the next advertisement triggers a fresh
