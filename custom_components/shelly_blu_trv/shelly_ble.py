@@ -317,7 +317,6 @@ class ShellyBluTrvBleClient:
             self._ble_device.address,
             self._ble_device.name,
             _details,
-            rssi=self._ble_device.rssi,
         )
         self._client = await establish_connection(
             BleakClient,
