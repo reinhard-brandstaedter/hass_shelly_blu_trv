@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 
-from bleak import BleakError
 from homeassistant.components.bluetooth import (
     async_ble_device_from_address,
     async_scanner_devices_by_address,
@@ -92,9 +91,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.async_create_task(coordinator.async_startup_probe())
 
     async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
-        """Apply updated options to the running coordinator without reloading."""
-        coordinator.set_preferred_proxy(entry.options.get(CONF_PREFERRED_PROXY))
-        hass.async_create_task(coordinator.async_startup_probe())
+        """Reload the config entry when options change.
+
+        A full reload is required so that async_setup_entry re-runs with the
+        new preferred_proxy, creates a fresh coordinator, and fires the startup
+        probe.  Scheduling a task on the existing coordinator is unreliable —
+        the task can be silently dropped before the event loop yields.
+        """
+        _LOGGER.debug("Options updated for %s — reloading config entry", entry.title)
+        await hass.config_entries.async_reload(entry.entry_id)
 
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
