@@ -7,9 +7,7 @@ import logging
 import time
 from typing import Any
 
-from bleak import BleakClient
 from bleak.backends.device import BLEDevice
-from bleak_retry_connector import establish_connection
 from homeassistant.components.bluetooth import (
     BluetoothScannerDevice,
     BluetoothServiceInfoBleak,
@@ -418,18 +416,16 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         """Attempt a single BLE connection immediately after setup.
 
         Gives the TRV a chance to complete bonding within its 30-second pairing
-        window.  Uses a fresh BleakClient that is independent of self._client so
-        it never races with the concurrent advertisement-triggered poll for
-        _device_lock.  The poll also connects in parallel — whichever arrives
-        first while the TRV is in pairing mode completes the bonding.
+        window.  Uses self._client.connect() under _device_lock so that all proxy
+        source guards (source-hint check, _refresh_ble_device) are applied — this
+        prevents bleak-retry-connector from internally falling back to the wrong
+        proxy (e.g. tempsensor-wz) when the raw establish_connection path was used.
 
-        Intentionally does NOT set _auth_failed_at on failure: the probe runs
-        concurrently with the regular poll, and setting the backoff here would
-        block the poll from succeeding even if it connects after the probe fails.
-        The poll is responsible for setting _auth_failed_at on repeated failures.
+        _probe_in_progress suppresses advertisement-triggered polls while the
+        probe holds _device_lock, so there is no deadlock or race condition.
 
-        _probe_in_progress suppresses subsequent advertisement-triggered polls
-        while the probe is still running so they don't pile up.
+        Does NOT set _auth_failed_at on failure so a concurrent poll can still
+        succeed (e.g. TRV bonds during the poll window instead of the probe).
 
         Pairing flow:
           1. Put TRV in pairing mode (30 s window).
@@ -439,41 +435,23 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         self._probe_in_progress = True
         _LOGGER.debug("Startup probe: attempting connection to %s", self.device_name)
         try:
-            try:
-                self._refresh_ble_device()
-            except ConnectionError as err:
-                _LOGGER.debug("Startup probe skipped for %s: %s", self.device_name, err)
-                return
-
-            ble_device = self._client.ble_device
-            if ble_device is None:
-                return
-
-            # Use a fresh BleakClient — never touches self._client state.
-            # Acquire the per-proxy semaphore so that simultaneous startup
-            # probes from multiple TRVs (all on the same proxy) don't
-            # overwhelm the ESP32 BLE stack, which typically supports only
-            # 3 concurrent connections.  Without this guard, a reload with
-            # 3 TRVs fires 3 probes + 3 polls simultaneously → 6 connections
-            # → proxy drops connections mid-GATT-discovery → "Characteristic
-            # not found" errors.
+            # Acquire the per-proxy semaphore so simultaneous startup probes from
+            # multiple TRVs on the same proxy don't overwhelm the ESP32 BLE stack.
+            # _probe_in_progress suppresses advertisement-triggered polls while we
+            # hold _device_lock, so there is no deadlock risk.
             proxy_source = self._resolve_proxy_source()
             semaphore = _get_proxy_semaphore(proxy_source)
             try:
                 async with semaphore:
-                    client = await establish_connection(
-                        BleakClient,
-                        ble_device,
-                        self._client.address,
-                        max_attempts=1,
-                        ble_device_callback=lambda: ble_device,
-                    )
-                    await client.disconnect()
-                # Probe connected cleanly — bonding is either already established
-                # or just completed (TRV was in pairing mode).  Clear any stale
-                # auth-failure backoff so the next advertisement triggers a fresh
-                # poll instead of waiting 30 min.  The poll will immediately
-                # confirm whether bonding actually succeeded.
+                    async with self._device_lock:
+                        # connect() runs _refresh_ble_device() and the source-hint
+                        # guard, which rejects connections through the wrong proxy
+                        # (e.g. tempsensor-wz) before establish_connection is even
+                        # called.  Using raw establish_connection here bypassed those
+                        # guards and let bleak-retry-connector internally pick a
+                        # different proxy device.
+                        await self._client.connect()
+                        await self._client.disconnect()
                 if self._auth_failed_at:
                     _LOGGER.debug(
                         "Startup probe succeeded for %s — clearing auth backoff",
@@ -482,6 +460,8 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                     self._auth_failed_at = 0
                 else:
                     _LOGGER.debug("Startup probe succeeded for %s", self.device_name)
+            except ConnectionError as err:
+                _LOGGER.debug("Startup probe skipped for %s: %s", self.device_name, err)
             except Exception as err:
                 _LOGGER.debug("Startup probe failed for %s: %s", self.device_name, err)
         finally:
