@@ -149,7 +149,9 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         self._last_ext_temp_sent: float | None = None
         self._last_ext_temp_time: float = 0
         self._auth_failed_at: float = 0  # epoch time of last auth failure; 0 = never
-        self._probe_in_progress: bool = False  # blocks polls while startup probe runs
+        self._probe_in_progress: bool = True  # True until startup probe completes,
+        # blocking polls from firing before the probe has had a chance to run.
+        # Set back to False in async_startup_probe() finally block.
 
     @property
     def client(self) -> ShellyBluTrvBleClient:

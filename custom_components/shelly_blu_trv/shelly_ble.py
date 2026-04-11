@@ -336,7 +336,7 @@ class ShellyBluTrvBleClient:
         # If service discovery failed or is incomplete the writes will fail
         # with "Characteristic not found"; catching it here lets the retry
         # loop reconnect instead of burning a write attempt.
-        for char_uuid in (SHELLY_RPC_TX_CTL_UUID, SHELLY_RPC_DATA_UUID):
+        for char_uuid in (SHELLY_RPC_TX_CTL_UUID, SHELLY_RPC_DATA_UUID, SHELLY_RPC_RX_CTL_UUID):
             if self._client.services.get_characteristic(char_uuid) is None:
                 await self.disconnect()
                 raise ConnectionError(
