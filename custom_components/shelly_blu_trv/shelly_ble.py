@@ -10,6 +10,7 @@ import json
 import logging
 import struct
 import time
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -302,16 +303,18 @@ class ShellyBluTrvBleClient:
                 f"but proxy hint is {self._source_hint} — refusing wrong-proxy connection"
             )
 
-        # Snapshot the BLE device and pass it as ble_device_callback so that
-        # establish_connection always uses the preferred-proxy device regardless
-        # of how many internal retry attempts it makes.  Without this, HA's
-        # multi-proxy wrapper of establish_connection queries
-        # async_ble_device_from_address() on each attempt and falls back to
-        # other proxies (e.g. a previously-bonded tempsensor-wz), bypassing our
-        # preferred-proxy filtering entirely.
-        # max_attempts=1: let our outer MAX_RETRIES loop handle retries with a
-        # proper RETRY_DELAY between attempts.
-        _device = self._ble_device
+        # Create a pinned copy of the BLEDevice with the details dict
+        # snapshotted.  HA's BT stack mutates BLEDevice.details in-place as
+        # new advertisements arrive (e.g. tempsensor-wz overtakes bt-proxy-3
+        # as the "best" scanner mid-connection).  bleak-retry-connector calls
+        # ble_device_callback on its internal retry, which would return the
+        # mutated object with the wrong source.  A copy with a frozen details
+        # dict prevents this.  We also pin "source" to self._source_hint so
+        # that the copy is always correct even if other detail fields change.
+        _details = dict(self._ble_device.details) if isinstance(self._ble_device.details, dict) else self._ble_device.details
+        if self._source_hint and isinstance(_details, dict):
+            _details = {**_details, "source": self._source_hint}
+        _device = dataclasses.replace(self._ble_device, details=_details)
         self._client = await establish_connection(
             BleakClient,
             _device,
