@@ -454,7 +454,31 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                         # the wrong proxy (e.g. tempsensor-wz).
                         self._refresh_ble_device()
                         await self._client.connect()
-                        await self._client.disconnect()
+                        try:
+                            # A GATT write is required to trigger BLE bonding.
+                            # A bare connect+disconnect only does service
+                            # discovery, which works without authentication and
+                            # never triggers the pairing handshake.  The TRV's
+                            # 30-second pairing window waits for a secured write.
+                            # Shelly.GetDeviceInfo is the lightest RPC call that
+                            # causes a write to the TX characteristic.
+                            await self._client.async_get_device_info()
+                            _LOGGER.debug(
+                                "Startup probe RPC succeeded for %s — bonding confirmed",
+                                self.device_name,
+                            )
+                        except Exception as rpc_err:
+                            # Error 19 = TRV not in pairing mode, or bonded to
+                            # a different proxy.  Any other error = transient.
+                            # Either way the connection itself worked; log and
+                            # continue so the subsequent poll can try normally.
+                            _LOGGER.debug(
+                                "Startup probe RPC failed for %s: %s",
+                                self.device_name,
+                                rpc_err,
+                            )
+                        finally:
+                            await self._client.disconnect()
                 if self._auth_failed_at:
                     _LOGGER.debug(
                         "Startup probe succeeded for %s — clearing auth backoff",
