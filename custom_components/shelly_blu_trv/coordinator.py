@@ -18,7 +18,10 @@ from homeassistant.components.bluetooth.active_update_coordinator import (
     ActiveBluetoothDataUpdateCoordinator,
 )
 from homeassistant.components.persistent_notification import async_create as pn_create
+from datetime import timedelta
+
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.event import async_track_time_interval
 
 from .const import DOMAIN, POLL_INTERVAL
 
@@ -160,11 +163,47 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         self._probe_in_progress: bool = True  # True until startup probe completes,
         # blocking polls from firing before the probe has had a chance to run.
         # Set back to False in async_startup_probe() finally block.
+        self._poll_timer_unsub: callback | None = None  # cancels the fallback timer
 
     @property
     def client(self) -> ShellyBluTrvBleClient:
         """Return the BLE client."""
         return self._client
+
+    @callback
+    def async_start(self) -> callback:
+        """Start the coordinator and register the fallback poll timer."""
+        cancel_super = super().async_start()
+
+        @callback
+        def _timer_poll(_now: Any) -> None:
+            """Periodic fallback poll — fires even without BLE advertisements."""
+            if self._probe_in_progress:
+                return
+            now = time.time()
+            if (now - self._last_poll_time) < POLL_INTERVAL:
+                return
+            _LOGGER.debug(
+                "Fallback timer poll for %s (no advertisement in >%ds)",
+                self.device_name,
+                POLL_INTERVAL,
+            )
+            self.hass.async_create_task(self._async_update(None))
+
+        self._poll_timer_unsub = async_track_time_interval(
+            self.hass,
+            _timer_poll,
+            timedelta(seconds=POLL_INTERVAL),
+        )
+
+        @callback
+        def _cancel_all() -> None:
+            if self._poll_timer_unsub:
+                self._poll_timer_unsub()
+                self._poll_timer_unsub = None
+            cancel_super()
+
+        return _cancel_all
 
     @callback
     def _needs_poll(
@@ -181,7 +220,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
 
     async def _async_update(
         self,
-        service_info: BluetoothServiceInfoBleak,
+        service_info: BluetoothServiceInfoBleak | None,
     ) -> None:
         """Poll the device for full status via RPC."""
         _LOGGER.debug("Polling %s for full status", self.device_name)
@@ -191,7 +230,8 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         # the advertisement (could be the wrong one for bonded devices).
         # _refresh_ble_device() called inside the retry loop handles the
         # preferred-proxy case correctly.
-        if not self._preferred_proxy:
+        # service_info is None when called from the fallback timer.
+        if not self._preferred_proxy and service_info is not None:
             self.ble_device = service_info.device
             self._client.set_ble_device(service_info.device, rssi=service_info.rssi)
 
