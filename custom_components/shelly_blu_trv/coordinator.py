@@ -17,6 +17,7 @@ from homeassistant.components.bluetooth import (
 from homeassistant.components.bluetooth.active_update_coordinator import (
     ActiveBluetoothDataUpdateCoordinator,
 )
+from homeassistant.components.persistent_notification import async_create as pn_create
 from homeassistant.core import HomeAssistant, callback
 
 from .const import DOMAIN, POLL_INTERVAL
@@ -79,20 +80,26 @@ COMMAND_FAILED = object()
 
 
 def _is_auth_error(err: Exception) -> bool:
-    """Return True when *err* is a BLE authentication / bonding failure (error 19).
+    """Return True when *err* is a BLE authentication / bonding failure.
 
-    The TRV terminates connections from proxies it is not bonded to with HCI
-    error 0x13 (decimal 19, "Remote User Terminated Connection").  This
-    surfaces differently depending on the BT backend:
+    Covers two distinct failure modes:
 
+    1. Error 19 (HCI 0x13 "Remote User Terminated Connection"): proxy has no
+       bonding keys for the TRV, so the TRV drops the connection during GATT
+       discovery or after a write.
+
+    2. GATT error 259 (0x103, ATT "Write Not Permitted"): the proxy has stale/
+       mismatched bonding keys — it connects successfully but the link is never
+       encrypted, so the TRV rejects writes to secured characteristics.
+
+    Both require re-pairing to fix.  Backing off stops the repeated connection
+    attempts that wear the proxy's NVS bond entry and accelerate corruption.
+
+    Surfaces by BT backend:
     - Linux/BlueZ:    OSError errno 19, or message contains "error 19" /
                       "[errno 19]" / "authentication" / "unauthoriz"
-    - ESPHome proxy:  "ESP_GATT_CONN_TERMINATE_PEER_USER" or
-                      "Unknown error (19)" (with parentheses, from GATT
-                      service-discovery and write-response failures)
-
-    Each rejected attempt adds a stale entry to the TRV's fixed-size bond
-    table, so the retry loop must stop as soon as it sees this error.
+    - ESPHome proxy:  "ESP_GATT_CONN_TERMINATE_PEER_USER",
+                      "Unknown error (19)", or "error=259"
     """
     if isinstance(err, OSError) and err.errno == 19:
         return True
@@ -104,6 +111,7 @@ def _is_auth_error(err: Exception) -> bool:
         or "terminate_peer_user" in msg
         or "authentication" in msg
         or "unauthoriz" in msg
+        or "error=259" in msg
     )
 
 
@@ -148,6 +156,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         self._last_ext_temp_sent: float | None = None
         self._last_ext_temp_time: float = 0
         self._auth_failed_at: float = 0  # epoch time of last auth failure; 0 = never
+        self._bond_failure_notified: bool = False  # True after HA notification sent
         self._probe_in_progress: bool = True  # True until startup probe completes,
         # blocking polls from firing before the probe has had a chance to run.
         # Set back to False in async_startup_probe() finally block.
@@ -289,12 +298,13 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                         if _is_auth_error(err):
                             self._auth_failed_at = time.time()
                             _LOGGER.warning(
-                                "Auth failure (error 19) polling %s — "
+                                "Bond/auth failure polling %s — "
                                 "backing off for %d min to protect bond table. "
                                 "Save integration options to retry sooner (e.g. after re-pairing).",
                                 self.device_name,
                                 AUTH_RETRY_INTERVAL // 60,
                             )
+                            self._notify_bond_failure()
                             return
 
             if attempt < MAX_RETRIES:
@@ -407,10 +417,44 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                 self.device_name,
             )
             self._auth_failed_at = 0
+        self._bond_failure_notified = False
         _LOGGER.debug(
             "Preferred proxy for %s set to: %s",
             self.device_name,
             proxy_source or "auto",
+        )
+
+    def _notify_bond_failure(self) -> None:
+        """Fire a HA persistent notification when a bond mismatch is detected.
+
+        Only fires once per bond-failure event; reset by set_preferred_proxy()
+        (called when the user saves integration options to trigger re-pairing).
+        """
+        if self._bond_failure_notified:
+            return
+        self._bond_failure_notified = True
+        notification_id = f"shelly_blu_trv_bond_{self.base_unique_id}"
+        pn_create(
+            self.hass,
+            (
+                f"**{self.device_name}** has a BLE bond mismatch — "
+                "connections succeed but GATT writes are rejected (error 259 / error 19). "
+                "The TRV and its BT proxy have inconsistent bonding keys.\n\n"
+                "**To fix:**\n"
+                "1. Factory-reset the BT proxy NVS (ESPHome `factory_reset` button)\n"
+                "2. Factory-reset the TRV (hold button >20 s)\n"
+                "3. Put TRV in pairing mode\n"
+                "4. Disable → Enable the integration entry in HA\n\n"
+                "Connections are paused for 30 min to protect the bond table. "
+                "Saving integration options resets the timer immediately."
+            ),
+            title=f"Shelly BLU TRV: re-pairing required ({self.device_name})",
+            notification_id=notification_id,
+        )
+        _LOGGER.warning(
+            "Bond mismatch detected for %s — HA notification created (id: %s)",
+            self.device_name,
+            notification_id,
         )
 
     async def async_startup_probe(self) -> None:
@@ -710,12 +754,13 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                         if _is_auth_error(err):
                             self._auth_failed_at = time.time()
                             _LOGGER.warning(
-                                "Auth failure (error 19) setting target for %s — "
+                                "Bond/auth failure setting target for %s — "
                                 "backing off for %d min to protect bond table. "
                                 "Save integration options to retry sooner (e.g. after re-pairing).",
                                 self.device_name,
                                 AUTH_RETRY_INTERVAL // 60,
                             )
+                            self._notify_bond_failure()
                     finally:
                         proxy_sem.release()
 
@@ -884,13 +929,14 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                         if _is_auth_error(err):
                             self._auth_failed_at = time.time()
                             _LOGGER.warning(
-                                "Auth failure (error 19) executing RPC %s for %s — "
+                                "Bond/auth failure executing RPC %s for %s — "
                                 "backing off for %d min to protect bond table. "
                                 "Save integration options to retry sooner (e.g. after re-pairing).",
                                 method,
                                 self.device_name,
                                 AUTH_RETRY_INTERVAL // 60,
                             )
+                            self._notify_bond_failure()
                     finally:
                         proxy_sem.release()
 
