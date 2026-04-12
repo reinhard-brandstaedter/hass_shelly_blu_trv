@@ -453,7 +453,12 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                         # preventing bleak-retry-connector from falling back to
                         # the wrong proxy (e.g. tempsensor-wz).
                         self._refresh_ble_device()
-                        await self._client.connect()
+                        # Hard timeout on connect: bleak-retry-connector retries
+                        # aggressively for fast failures (TERMINATE_PEER_USER)
+                        # and can spend 80+ seconds on 9 internal attempts, blowing
+                        # past the TRV's 30-second pairing window.  25 s gives one
+                        # real connection attempt with GATT discovery headroom.
+                        await asyncio.wait_for(self._client.connect(), timeout=25.0)
                         try:
                             # A GATT write is required to trigger BLE bonding.
                             # A bare connect+disconnect only does service
@@ -462,7 +467,9 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                             # 30-second pairing window waits for a secured write.
                             # Shelly.GetDeviceInfo is the lightest RPC call that
                             # causes a write to the TX characteristic.
-                            await self._client.async_get_device_info()
+                            await asyncio.wait_for(
+                                self._client.async_get_device_info(), timeout=10.0
+                            )
                             _LOGGER.debug(
                                 "Startup probe RPC succeeded for %s — bonding confirmed",
                                 self.device_name,
