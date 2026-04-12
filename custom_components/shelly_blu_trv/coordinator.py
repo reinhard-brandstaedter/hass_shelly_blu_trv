@@ -509,10 +509,11 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                             # discovery, which works without authentication and
                             # never triggers the pairing handshake.  The TRV's
                             # 30-second pairing window waits for a secured write.
-                            # Shelly.GetDeviceInfo is the lightest RPC call that
-                            # causes a write to the TX characteristic.
+                            # Sys.SetTime is the call Shelly documents for the
+                            # pairing flow and also syncs the TRV clock as a
+                            # useful side effect.
                             await asyncio.wait_for(
-                                self._client.async_get_device_info(), timeout=10.0
+                                self._client.async_sync_time(), timeout=10.0
                             )
                             _LOGGER.debug(
                                 "Startup probe RPC succeeded for %s — bonding confirmed",
