@@ -82,6 +82,9 @@
       },
       "identify": {
         "name": "Identify"
+      },
+      "poll_status": {
+        "name": "Refresh status"
       }
     },
     "number": {

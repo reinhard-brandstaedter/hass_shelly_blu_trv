@@ -38,6 +38,10 @@ async def _identify(coordinator: ShellyBluTrvCoordinator) -> None:
     await coordinator.async_rpc_command("Trv.ShowMessage", {"id": 0, "msg": "HELLO"})
 
 
+async def _poll_status(coordinator: ShellyBluTrvCoordinator) -> None:
+    await coordinator.async_poll_status()
+
+
 BUTTON_DESCRIPTIONS: list[ShellyBluTrvButtonDescription] = [
     ShellyBluTrvButtonDescription(
         key="calibrate",
@@ -58,6 +62,13 @@ BUTTON_DESCRIPTIONS: list[ShellyBluTrvButtonDescription] = [
         translation_key="identify",
         icon="mdi:eye",
         press_fn=_identify,
+    ),
+    ShellyBluTrvButtonDescription(
+        key="poll_status",
+        translation_key="poll_status",
+        icon="mdi:refresh",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        press_fn=_poll_status,
     ),
 ]
 

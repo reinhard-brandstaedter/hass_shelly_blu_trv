@@ -497,6 +497,11 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
             notification_id,
         )
 
+    async def async_poll_status(self) -> None:
+        """Manually trigger a full status poll and notify entities."""
+        await self._async_update(None)
+        self.async_update_listeners()
+
     async def async_startup_probe(self) -> None:
         """Attempt a single BLE connection immediately after setup.
 
