@@ -553,7 +553,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                             # pairing flow and also syncs the TRV clock as a
                             # useful side effect.
                             await asyncio.wait_for(
-                                self._client.async_sync_time(), timeout=10.0
+                                self._client.async_set_time(), timeout=10.0
                             )
                             _LOGGER.debug(
                                 "Startup probe RPC succeeded for %s — bonding confirmed",
