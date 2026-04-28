@@ -21,6 +21,8 @@ from homeassistant.components.persistent_notification import async_create as pn_
 from datetime import timedelta
 
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.device_registry import async_get as dr_async_get
+from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH
 from homeassistant.helpers.event import async_track_time_interval
 
 from .const import DOMAIN, POLL_INTERVAL
@@ -394,6 +396,25 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                         flags_raw,
                     )
                 self._last_config_poll = now
+
+            # Fetch firmware version alongside config — separate BLE connection.
+            device_info = await self.async_rpc_command("Shelly.GetDeviceInfo")
+            if device_info and isinstance(device_info, dict):
+                fw = device_info.get("fw_id")
+                if fw and fw != self.state.firmware:
+                    _LOGGER.debug(
+                        "Firmware version updated for %s: %s → %s",
+                        self.device_name,
+                        self.state.firmware,
+                        fw,
+                    )
+                    self.state.firmware = fw
+                    dr = dr_async_get(self.hass)
+                    dev = dr.async_get_device(
+                        connections={(CONNECTION_BLUETOOTH, self.state.mac)}
+                    )
+                    if dev:
+                        dr.async_update_device(dev.id, sw_version=fw)
 
     @callback
     def _async_handle_bluetooth_event(
