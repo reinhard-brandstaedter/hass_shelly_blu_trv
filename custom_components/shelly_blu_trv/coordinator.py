@@ -668,36 +668,13 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                 self._client.set_ble_device(sd.ble_device)
                 return
             # Preferred proxy has no recent advertisement for this device.
-            # Check whether the current device reference is already pointing at
-            # the correct proxy.  If it is, keep it and attempt the connection
-            # (the proxy may still be able to reach the device).  If it points
-            # at a confirmed wrong proxy, raise immediately so the retry loop
-            # skips this attempt.
-            #
-            # Special case: source=None means a merged/startup BLEDevice from
-            # async_ble_device_from_address.  Rather than raising, construct a
-            # pinned device reference with source=preferred_proxy so the
-            # connection attempt is routed correctly.  This handles power_save
-            # TRVs that advertise infrequently via the preferred proxy but are
-            # seen via another proxy — the preferred proxy can still connect
-            # even without a recent advertisement.  connect()'s source-hint
-            # guard remains the final safety net.
+            # Only attempt a connection if the current device reference already
+            # points at the correct proxy; raise ConnectionError otherwise.
+            # A merged device (source=None) from async_ble_device_from_address
+            # lacks the ESPHome routing details needed to reach the correct proxy,
+            # so treating it the same as a wrong-proxy device is the safest option.
             current_source = self._client.ble_device_source
-            if current_source is None:
-                # Build a pinned device reference pointing at the preferred proxy.
-                cur = self._client._ble_device  # noqa: SLF001
-                _details = dict(cur.details) if isinstance(cur.details, dict) else {}
-                _details["source"] = self._preferred_proxy
-                pinned = BLEDevice(cur.address, cur.name, _details)
-                self.ble_device = pinned
-                self._client.set_ble_device(pinned)
-                _LOGGER.debug(
-                    "Preferred proxy %s has no recent advertisement for %s "
-                    "— pinning device reference to preferred proxy (was source=None)",
-                    self._preferred_proxy,
-                    self.device_name,
-                )
-            elif current_source != self._preferred_proxy:
+            if current_source is None or current_source != self._preferred_proxy:
                 raise ConnectionError(
                     f"Preferred proxy {self._preferred_proxy} has no recent "
                     f"advertisement for {self.device_name} and current device "
