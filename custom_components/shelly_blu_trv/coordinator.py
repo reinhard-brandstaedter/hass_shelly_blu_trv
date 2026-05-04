@@ -416,6 +416,10 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                     if dev:
                         dr.async_update_device(dev.id, sw_version=fw)
 
+        # Notify entities after every successful poll so that sensors update
+        # even when no BTHome advertisement arrives (e.g. power_save TRVs).
+        self.async_update_listeners()
+
     @callback
     def _async_handle_bluetooth_event(
         self,
