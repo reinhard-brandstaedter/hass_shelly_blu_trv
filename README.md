@@ -97,6 +97,10 @@ RPC Commands (active, on-demand + 5min poll)
 
 ### "Unknown error (19)" — stale BLE bond
 
+> [!NOTE]
+> Auth errors/failures likely are a impact of an issue in the ESP-IDF framework that is not yet backported to any release (as of May 2026)
+> [See this Issue comment](#issuecomment-4346999477)
+
 If you see `BluetoothGATTErrorResponse: Unknown error (19)` in the logs, the BLE bond between the ESP32 proxy and the TRV has gone stale. Fix by re-pairing:
 
 1. Turn the TRV knob **4 times clockwise/ccw** within 10 seconds to enter the menu and then turn the know to enter BLE pairing mode
