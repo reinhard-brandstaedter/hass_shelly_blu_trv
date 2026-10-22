@@ -37,6 +37,10 @@ _LOGGER = logging.getLogger(__name__)
 # Encryption.  ESPHome proxies report them as "... error=15 description=...".
 _INSUFFICIENT_SECURITY_RE = re.compile(r"\berror=(5|15)\b")
 
+# ATT 0x03 "Write not permitted": the cached GATT handle points at a different
+# characteristic after a firmware update.
+_STALE_HANDLE_RE = re.compile(r"\berror=3\b")
+
 # Pause before the single retry of a failed pair() on the same connection.
 PAIR_RETRY_DELAY = 1.0
 
@@ -359,6 +363,8 @@ class ShellyBluTrvBleClient:
         # loop reconnect instead of burning a write attempt.
         for char_uuid in (SHELLY_RPC_TX_CTL_UUID, SHELLY_RPC_DATA_UUID, SHELLY_RPC_RX_CTL_UUID):
             if self._client.services.get_characteristic(char_uuid) is None:
+                # A stale cached table can also lack the characteristics.
+                await self._async_clear_gatt_cache()
                 await self.disconnect()
                 raise ConnectionError(
                     f"RPC characteristic {char_uuid} not found on {self._address} "
@@ -499,18 +505,71 @@ class ShellyBluTrvBleClient:
         try:
             await self._client.write_gatt_char(char_uuid, data, response=True)
         except Exception as err:
+            await self._async_raise_if_stale_cache(err)
             if not await self._async_secure_link(err):
                 raise
-            await self._client.write_gatt_char(char_uuid, data, response=True)
+            try:
+                await self._client.write_gatt_char(char_uuid, data, response=True)
+            except Exception as retry_err:
+                await self._async_raise_if_stale_cache(retry_err)
+                raise
 
     async def _async_read(self, char_uuid: str) -> bytearray:
         """Read a characteristic, securing the link once if it is rejected."""
         try:
             return await self._client.read_gatt_char(char_uuid)
         except Exception as err:
+            await self._async_raise_if_stale_cache(err)
             if not await self._async_secure_link(err):
                 raise
-            return await self._client.read_gatt_char(char_uuid)
+            try:
+                return await self._client.read_gatt_char(char_uuid)
+            except Exception as retry_err:
+                await self._async_raise_if_stale_cache(retry_err)
+                raise
+
+    async def _async_clear_gatt_cache(self) -> None:
+        """Drop the cached GATT table (HA memory + ESPHome proxy NVS).
+
+        Must be called while connected.  The next connection then runs a
+        fresh service discovery.
+        """
+        try:
+            await asyncio.wait_for(self._client.clear_cache(), timeout=10.0)
+            _LOGGER.debug(
+                "Cleared GATT cache for %s via %s", self._address, self._proxy_source()
+            )
+        except Exception as err:
+            _LOGGER.debug(
+                "Clearing GATT cache for %s via %s failed: %s",
+                self._address,
+                self._proxy_source(),
+                err,
+            )
+
+    async def _async_raise_if_stale_cache(self, err: Exception) -> None:
+        """Handle a write to a characteristic handle that no longer exists.
+
+        A TRV firmware update can rearrange the GATT table (1.4.x -> 1.5.x
+        moved the RPC data characteristic from handle 38 to 80).  ESPHome
+        proxies connect with the cached table, so writes keep going to the
+        old handle and fail with ATT 0x03 "Write not permitted".  Clear the
+        cache, disconnect and raise ConnectionError so the caller's retry
+        reconnects with a fresh service discovery.
+        """
+        if not _STALE_HANDLE_RE.search(str(err)):
+            return
+        _LOGGER.warning(
+            "GATT table of %s looks stale (%s) - clearing cache and reconnecting "
+            "(expected once after a TRV firmware update)",
+            self._address,
+            err,
+        )
+        await self._async_clear_gatt_cache()
+        await self.disconnect()
+        raise ConnectionError(
+            f"Stale GATT cache for {self._address}; cleared, retry with fresh discovery"
+        ) from err
 
     async def _async_secure_link(self, err: Exception) -> bool:
         """Encrypt the link after a write/read was rejected for lack of security.
