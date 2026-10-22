@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import struct
 import time
 from dataclasses import dataclass, field
@@ -30,6 +31,11 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# GATT/ATT errors returned when a secured characteristic is written over a link
+# that is not encrypted: 0x05 Insufficient Authentication, 0x0F Insufficient
+# Encryption.  ESPHome proxies report them as "... error=15 description=...".
+_INSUFFICIENT_SECURITY_RE = re.compile(r"\berror=(5|15)\b")
 
 # RPC request ID counter
 _rpc_id_counter = 0
@@ -235,6 +241,7 @@ class ShellyBluTrvBleClient:
         self._mtu: int = 20  # Conservative default, will negotiate higher
         self._source_hint: str | None = None  # Set by coordinator before each connect
         self._rssi: int | None = None  # Last advertisement RSSI from coordinator
+        self._pair_attempted = False  # pair() tried on the current connection
 
     @property
     def address(self) -> str:
@@ -326,6 +333,7 @@ class ShellyBluTrvBleClient:
             ble_device_callback=lambda: _device,
         )
         self._connected = True
+        self._pair_attempted = False
 
         # Get negotiated MTU (minus 3 bytes for ATT header)
         self._mtu = min(self._client.mtu_size - 3, 512) if self._client.mtu_size else 20
@@ -406,9 +414,18 @@ class ShellyBluTrvBleClient:
 
             # Step 1: Write payload length to TX control
             length_bytes = struct.pack(">I", payload_length)
-            await self._client.write_gatt_char(
-                SHELLY_RPC_TX_CTL_UUID, length_bytes, response=True
-            )
+            try:
+                await self._client.write_gatt_char(
+                    SHELLY_RPC_TX_CTL_UUID, length_bytes, response=True
+                )
+            except Exception as err:
+                # Firmware 1.5.x no longer sends a security request, so the
+                # link stays unencrypted unless the central encrypts it.
+                if not await self._async_secure_link(err):
+                    raise
+                await self._client.write_gatt_char(
+                    SHELLY_RPC_TX_CTL_UUID, length_bytes, response=True
+                )
 
             # Step 2: Write payload to data characteristic (chunked)
             offset = 0
@@ -477,6 +494,46 @@ class ShellyBluTrvBleClient:
                 return None
 
             return response.get("result")
+
+    async def _async_secure_link(self, err: Exception) -> bool:
+        """Encrypt the link after a write was rejected for lack of security.
+
+        TRV firmware up to 1.4.x sends an SMP security request, so the proxy
+        encrypts (or, in pairing mode, pairs) on its own.  Firmware 1.5.x does
+        not: the central must start it.  pair() on an ESPHome proxy calls
+        esp_ble_set_encryption(), which reuses a stored bond if there is one
+        and otherwise pairs - only accepted while the TRV is in pairing mode.
+
+        Tried at most once per connection.  Returns True if the caller should
+        retry the write.
+        """
+        if self._pair_attempted or not _INSUFFICIENT_SECURITY_RE.search(str(err)):
+            return False
+        self._pair_attempted = True
+        _LOGGER.debug(
+            "Write to %s via %s rejected (%s) - requesting encryption/pairing",
+            self._address,
+            self._proxy_source(),
+            err,
+        )
+        try:
+            # The ESPHome backend returns None and raises BleakError when the
+            # proxy reports the pairing as failed.
+            await asyncio.wait_for(self._client.pair(), timeout=20.0)
+        except Exception as pair_err:
+            _LOGGER.debug(
+                "Encryption/pairing with %s via %s failed: %s",
+                self._address,
+                self._proxy_source(),
+                pair_err,
+            )
+            return False
+        _LOGGER.debug(
+            "Encryption/pairing with %s via %s succeeded",
+            self._address,
+            self._proxy_source(),
+        )
+        return True
 
     # --- High-level TRV commands ---
 

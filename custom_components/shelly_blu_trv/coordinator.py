@@ -104,7 +104,9 @@ def _is_auth_error(err: Exception) -> bool:
     - Linux/BlueZ:    OSError errno 19, or message contains "error 19" /
                       "[errno 19]" / "authentication" / "unauthoriz"
     - ESPHome proxy:  "ESP_GATT_CONN_TERMINATE_PEER_USER",
-                      "Unknown error (19)", or "error=259"
+                      "Unknown error (19)", "error=259", or "Insufficient
+                      encryption" (error=15, raised when pair() could not
+                      secure the link - see ShellyBluTrvBleClient)
     """
     if isinstance(err, OSError) and err.errno == 19:
         return True
@@ -117,6 +119,7 @@ def _is_auth_error(err: Exception) -> bool:
         or "authentication" in msg
         or "unauthoriz" in msg
         or "error=259" in msg
+        or "insufficient encryption" in msg
     )
 
 
