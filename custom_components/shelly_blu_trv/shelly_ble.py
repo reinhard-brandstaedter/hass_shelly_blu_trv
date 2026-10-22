@@ -44,6 +44,10 @@ _STALE_HANDLE_RE = re.compile(r"\berror=3\b")
 # Pause before the single retry of a failed pair() on the same connection.
 PAIR_RETRY_DELAY = 1.0
 
+# Consecutive failed pair() calls (across connections) still treated as
+# transient on a TRV whose link was secured earlier in this session.
+MAX_TRANSIENT_PAIR_FAILURES = 3
+
 # RPC request ID counter
 _rpc_id_counter = 0
 
@@ -629,14 +633,19 @@ class ShellyBluTrvBleClient:
         whose link was already secured successfully in this session.
 
         The bond is evidently fine, so the coordinator retries normally
-        instead of entering the bond-protection backoff.  A second failure
-        in a row is treated as a real bond problem.
+        instead of entering the bond-protection backoff, for up to
+        MAX_TRANSIENT_PAIR_FAILURES failures in a row.
         """
         return (
             self._last_pair_failed
             and self._link_secured_before
-            and self._pair_failures_in_a_row == 1
+            and self._pair_failures_in_a_row <= MAX_TRANSIENT_PAIR_FAILURES
         )
+
+    @property
+    def link_secured_before(self) -> bool:
+        """True once pair() has succeeded on this TRV in this session."""
+        return self._link_secured_before
 
     # --- High-level TRV commands ---
 

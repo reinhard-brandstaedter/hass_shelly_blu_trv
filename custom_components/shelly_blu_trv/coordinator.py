@@ -59,6 +59,11 @@ CMD_LOCK_TIMEOUT = 120.0   # seconds: fail user command if BLE is busy
 # set_preferred_proxy() also resets the timer for the same reason.
 AUTH_RETRY_INTERVAL = 1800  # 30 minutes
 
+# Shorter backoff for a TRV whose link was secured successfully earlier in this
+# session: its bond is known to work, so repeated encryption failures are most
+# likely intermittent (seen on firmware 1.5.x) rather than a lost bond.
+SHORT_AUTH_RETRY_INTERVAL = 300  # 5 minutes
+
 # Per-proxy semaphore pool – serialises BLE connections through the same
 # BT proxy while letting TRVs on different proxies connect in parallel.
 # PROXY_SLOTS=1: all 3 TRVs share one proxy; allowing 2 concurrent
@@ -164,6 +169,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         self._last_ext_temp_sent: float | None = None
         self._last_ext_temp_time: float = 0
         self._auth_failed_at: float = 0  # epoch time of last auth failure; 0 = never
+        self._auth_retry_interval: int = AUTH_RETRY_INTERVAL  # set per failure
         self._bond_failure_notified: bool = False  # True after HA notification sent
         self._probe_in_progress: bool = True  # True until startup probe completes,
         # blocking polls from firing before the probe has had a chance to run.
@@ -241,13 +247,13 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
             self._client.set_ble_device(service_info.device, rssi=service_info.rssi)
 
         # --- Status poll (TRV.GetStatus) ---
-        if self._auth_failed_at and (time.time() - self._auth_failed_at) < AUTH_RETRY_INTERVAL:
+        if self._auth_failed_at and (time.time() - self._auth_failed_at) < self._auth_retry_interval:
             _LOGGER.debug(
                 "Skipping poll for %s: auth failure %.0f min ago, retrying after %d min "
                 "(save integration options to reset sooner)",
                 self.device_name,
                 (time.time() - self._auth_failed_at) / 60,
-                AUTH_RETRY_INTERVAL // 60,
+                self._auth_retry_interval // 60,
             )
             return
 
@@ -347,7 +353,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                                 "backing off for %d min to protect bond table. "
                                 "Save integration options to retry sooner (e.g. after re-pairing).",
                                 self.device_name,
-                                AUTH_RETRY_INTERVAL // 60,
+                                self._auth_retry_interval // 60,
                             )
                             self._notify_bond_failure()
                             return
@@ -528,12 +534,21 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
     def _is_bond_failure(self, err: Exception) -> bool:
         """Return True if *err* should start the bond-protection backoff.
 
-        A single failed pair() on a TRV whose link was already secured in this
-        session is transient (the bond is fine; the next attempt normally
-        succeeds), so it is retried instead of pausing for AUTH_RETRY_INTERVAL.
+        Up to MAX_TRANSIENT_PAIR_FAILURES failed pair() calls in a row on a TRV
+        whose link was already secured in this session are transient (the bond
+        is fine; a later attempt normally succeeds), so they are retried
+        instead of pausing.  Beyond that such a TRV backs off for
+        SHORT_AUTH_RETRY_INTERVAL; any other auth failure for the full
+        AUTH_RETRY_INTERVAL.
         """
         if not _is_auth_error(err):
             return False
+        # A TRV that encrypted successfully this session gets the short backoff.
+        self._auth_retry_interval = (
+            SHORT_AUTH_RETRY_INTERVAL
+            if self._client.link_secured_before
+            else AUTH_RETRY_INTERVAL
+        )
         if self._client.transient_pair_failure:
             _LOGGER.debug(
                 "One-off encryption failure for %s (bond worked earlier this "
@@ -733,14 +748,14 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
 
         Returns True if verified, False if all attempts failed.
         """
-        if self._auth_failed_at and (time.time() - self._auth_failed_at) < AUTH_RETRY_INTERVAL:
+        if self._auth_failed_at and (time.time() - self._auth_failed_at) < self._auth_retry_interval:
             _LOGGER.warning(
                 "Cannot set target temperature for %s: "
                 "auth failure %.0f min ago, retrying after %d min "
                 "(save integration options to reset sooner)",
                 self.device_name,
                 (time.time() - self._auth_failed_at) / 60,
-                AUTH_RETRY_INTERVAL // 60,
+                self._auth_retry_interval // 60,
             )
             return False
 
@@ -848,7 +863,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                                 "backing off for %d min to protect bond table. "
                                 "Save integration options to retry sooner (e.g. after re-pairing).",
                                 self.device_name,
-                                AUTH_RETRY_INTERVAL // 60,
+                                self._auth_retry_interval // 60,
                             )
                             self._notify_bond_failure()
                     finally:
@@ -952,7 +967,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         Connection failures are logged but not raised for non-critical
         commands to avoid crashing the websocket API.
         """
-        if self._auth_failed_at and (time.time() - self._auth_failed_at) < AUTH_RETRY_INTERVAL:
+        if self._auth_failed_at and (time.time() - self._auth_failed_at) < self._auth_retry_interval:
             _LOGGER.warning(
                 "Cannot execute RPC %s for %s: "
                 "auth failure %.0f min ago, retrying after %d min "
@@ -960,7 +975,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                 method,
                 self.device_name,
                 (time.time() - self._auth_failed_at) / 60,
-                AUTH_RETRY_INTERVAL // 60,
+                self._auth_retry_interval // 60,
             )
             return COMMAND_FAILED
 
@@ -1024,7 +1039,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                                 "Save integration options to retry sooner (e.g. after re-pairing).",
                                 method,
                                 self.device_name,
-                                AUTH_RETRY_INTERVAL // 60,
+                                self._auth_retry_interval // 60,
                             )
                             self._notify_bond_failure()
                     finally:
