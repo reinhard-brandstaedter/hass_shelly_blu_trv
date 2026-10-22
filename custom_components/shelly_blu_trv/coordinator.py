@@ -340,7 +340,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                             await self._client.disconnect()
                         except Exception:
                             pass
-                        if _is_auth_error(err):
+                        if self._is_bond_failure(err):
                             self._auth_failed_at = time.time()
                             _LOGGER.warning(
                                 "Bond/auth failure polling %s — "
@@ -524,6 +524,25 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
             self.device_name,
             notification_id,
         )
+
+    def _is_bond_failure(self, err: Exception) -> bool:
+        """Return True if *err* should start the bond-protection backoff.
+
+        A single failed pair() on a TRV whose link was already secured in this
+        session is transient (the bond is fine; the next attempt normally
+        succeeds), so it is retried instead of pausing for AUTH_RETRY_INTERVAL.
+        """
+        if not _is_auth_error(err):
+            return False
+        if self._client.transient_pair_failure:
+            _LOGGER.debug(
+                "One-off encryption failure for %s (bond worked earlier this "
+                "session) - retrying without backoff: %s",
+                self.device_name,
+                err,
+            )
+            return False
+        return True
 
     async def async_poll_status(self) -> None:
         """Manually trigger a full status poll and notify entities."""
@@ -822,7 +841,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                             await self._client.disconnect()
                         except Exception:
                             pass
-                        if _is_auth_error(err):
+                        if self._is_bond_failure(err):
                             self._auth_failed_at = time.time()
                             _LOGGER.warning(
                                 "Bond/auth failure setting target for %s — "
@@ -997,7 +1016,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                             await self._client.disconnect()
                         except Exception:
                             pass
-                        if _is_auth_error(err):
+                        if self._is_bond_failure(err):
                             self._auth_failed_at = time.time()
                             _LOGGER.warning(
                                 "Bond/auth failure executing RPC %s for %s — "

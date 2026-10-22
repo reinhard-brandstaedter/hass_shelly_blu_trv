@@ -37,6 +37,9 @@ _LOGGER = logging.getLogger(__name__)
 # Encryption.  ESPHome proxies report them as "... error=15 description=...".
 _INSUFFICIENT_SECURITY_RE = re.compile(r"\berror=(5|15)\b")
 
+# Pause before the single retry of a failed pair() on the same connection.
+PAIR_RETRY_DELAY = 1.0
+
 # RPC request ID counter
 _rpc_id_counter = 0
 
@@ -242,6 +245,9 @@ class ShellyBluTrvBleClient:
         self._source_hint: str | None = None  # Set by coordinator before each connect
         self._rssi: int | None = None  # Last advertisement RSSI from coordinator
         self._pair_attempted = False  # pair() tried on the current connection
+        self._last_pair_failed = False  # pair() failed on the current connection
+        self._link_secured_before = False  # pair() has succeeded this session
+        self._pair_failures_in_a_row = 0
 
     @property
     def address(self) -> str:
@@ -334,6 +340,7 @@ class ShellyBluTrvBleClient:
         )
         self._connected = True
         self._pair_attempted = False
+        self._last_pair_failed = False
 
         # Get negotiated MTU (minus 3 bytes for ATT header)
         self._mtu = min(self._client.mtu_size - 3, 512) if self._client.mtu_size else 20
@@ -514,8 +521,10 @@ class ShellyBluTrvBleClient:
         esp_ble_set_encryption(), which reuses a stored bond if there is one
         and otherwise pairs - only accepted while the TRV is in pairing mode.
 
-        Tried at most once per connection.  Returns True if the caller should
-        retry the operation.
+        Tried once per connection, with one retry after PAIR_RETRY_DELAY: an
+        occasional attempt fails within ~100 ms ("error: 80") although the
+        bond is fine and the next attempt succeeds.  Returns True if the
+        caller should retry the operation.
         """
         if self._pair_attempted or not _INSUFFICIENT_SECURITY_RE.search(str(err)):
             return False
@@ -526,24 +535,49 @@ class ShellyBluTrvBleClient:
             self._proxy_source(),
             err,
         )
-        try:
-            # The ESPHome backend returns None and raises BleakError when the
-            # proxy reports the pairing as failed.
-            await asyncio.wait_for(self._client.pair(), timeout=20.0)
-        except Exception as pair_err:
+        for attempt in (1, 2):
+            try:
+                # The ESPHome backend returns None and raises BleakError when
+                # the proxy reports the pairing as failed.
+                await asyncio.wait_for(self._client.pair(), timeout=20.0)
+            except Exception as pair_err:
+                _LOGGER.debug(
+                    "Encryption/pairing with %s via %s failed (attempt %d/2): %s",
+                    self._address,
+                    self._proxy_source(),
+                    attempt,
+                    pair_err,
+                )
+                if attempt == 1 and self._client.is_connected:
+                    await asyncio.sleep(PAIR_RETRY_DELAY)
+                    continue
+                self._last_pair_failed = True
+                self._pair_failures_in_a_row += 1
+                return False
             _LOGGER.debug(
-                "Encryption/pairing with %s via %s failed: %s",
+                "Encryption/pairing with %s via %s succeeded",
                 self._address,
                 self._proxy_source(),
-                pair_err,
             )
-            return False
-        _LOGGER.debug(
-            "Encryption/pairing with %s via %s succeeded",
-            self._address,
-            self._proxy_source(),
+            self._link_secured_before = True
+            self._pair_failures_in_a_row = 0
+            return True
+        return False
+
+    @property
+    def transient_pair_failure(self) -> bool:
+        """True if the last error came from a one-off failed pair() on a TRV
+        whose link was already secured successfully in this session.
+
+        The bond is evidently fine, so the coordinator retries normally
+        instead of entering the bond-protection backoff.  A second failure
+        in a row is treated as a real bond problem.
+        """
+        return (
+            self._last_pair_failed
+            and self._link_secured_before
+            and self._pair_failures_in_a_row == 1
         )
-        return True
 
     # --- High-level TRV commands ---
 
