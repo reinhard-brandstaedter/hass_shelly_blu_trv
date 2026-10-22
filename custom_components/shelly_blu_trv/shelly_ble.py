@@ -414,27 +414,14 @@ class ShellyBluTrvBleClient:
 
             # Step 1: Write payload length to TX control
             length_bytes = struct.pack(">I", payload_length)
-            try:
-                await self._client.write_gatt_char(
-                    SHELLY_RPC_TX_CTL_UUID, length_bytes, response=True
-                )
-            except Exception as err:
-                # Firmware 1.5.x no longer sends a security request, so the
-                # link stays unencrypted unless the central encrypts it.
-                if not await self._async_secure_link(err):
-                    raise
-                await self._client.write_gatt_char(
-                    SHELLY_RPC_TX_CTL_UUID, length_bytes, response=True
-                )
+            await self._async_write(SHELLY_RPC_TX_CTL_UUID, length_bytes)
 
             # Step 2: Write payload to data characteristic (chunked)
             offset = 0
             while offset < payload_length:
                 chunk_size = min(self._mtu, payload_length - offset)
                 chunk = payload[offset : offset + chunk_size]
-                await self._client.write_gatt_char(
-                    SHELLY_RPC_DATA_UUID, chunk, response=True
-                )
+                await self._async_write(SHELLY_RPC_DATA_UUID, chunk)
                 offset += chunk_size
 
             # Step 3: Poll RX control for response length
@@ -447,9 +434,7 @@ class ShellyBluTrvBleClient:
                 elapsed += poll_interval
 
                 try:
-                    rx_data = await self._client.read_gatt_char(
-                        SHELLY_RPC_RX_CTL_UUID
-                    )
+                    rx_data = await self._async_read(SHELLY_RPC_RX_CTL_UUID)
                     if rx_data and len(rx_data) >= 4:
                         response_length = struct.unpack(">I", rx_data[:4])[0]
                         if response_length > 0:
@@ -475,7 +460,7 @@ class ShellyBluTrvBleClient:
             response_data = bytearray()
             bytes_read = 0
             while bytes_read < response_length:
-                chunk = await self._client.read_gatt_char(SHELLY_RPC_DATA_UUID)
+                chunk = await self._async_read(SHELLY_RPC_DATA_UUID)
                 response_data.extend(chunk)
                 bytes_read += len(chunk)
 
@@ -495,8 +480,33 @@ class ShellyBluTrvBleClient:
 
             return response.get("result")
 
+    async def _async_write(self, char_uuid: str, data: bytes) -> None:
+        """Write a characteristic, securing the link once if it is rejected.
+
+        Firmware 1.5.x no longer sends a security request, so the link stays
+        unencrypted unless the central encrypts it.  Which characteristic is
+        rejected first varies (in pairing mode the TX control write can pass
+        and the data write fail), so every RPC write and read goes through
+        here or _async_read.
+        """
+        try:
+            await self._client.write_gatt_char(char_uuid, data, response=True)
+        except Exception as err:
+            if not await self._async_secure_link(err):
+                raise
+            await self._client.write_gatt_char(char_uuid, data, response=True)
+
+    async def _async_read(self, char_uuid: str) -> bytearray:
+        """Read a characteristic, securing the link once if it is rejected."""
+        try:
+            return await self._client.read_gatt_char(char_uuid)
+        except Exception as err:
+            if not await self._async_secure_link(err):
+                raise
+            return await self._client.read_gatt_char(char_uuid)
+
     async def _async_secure_link(self, err: Exception) -> bool:
-        """Encrypt the link after a write was rejected for lack of security.
+        """Encrypt the link after a write/read was rejected for lack of security.
 
         TRV firmware up to 1.4.x sends an SMP security request, so the proxy
         encrypts (or, in pairing mode, pairs) on its own.  Firmware 1.5.x does
@@ -505,13 +515,13 @@ class ShellyBluTrvBleClient:
         and otherwise pairs - only accepted while the TRV is in pairing mode.
 
         Tried at most once per connection.  Returns True if the caller should
-        retry the write.
+        retry the operation.
         """
         if self._pair_attempted or not _INSUFFICIENT_SECURITY_RE.search(str(err)):
             return False
         self._pair_attempted = True
         _LOGGER.debug(
-            "Write to %s via %s rejected (%s) - requesting encryption/pairing",
+            "GATT operation on %s via %s rejected (%s) - requesting encryption/pairing",
             self._address,
             self._proxy_source(),
             err,
