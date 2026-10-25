@@ -32,6 +32,7 @@ EXT_TEMP_MIN_INTERVAL = 60    # Minimum seconds between SetExternalTemperature B
 EXT_TEMP_MIN_DELTA = 0.3      # Minimum °C change required to send a new value
 EXT_TEMP_KEEPALIVE = 600      # Force resend after this many seconds even if value unchanged
                                # Prevents the TRV's ext_temp_missing timeout (~32 min observed)
+TARGET_CONFIRM_MAX_AGE = 900  # Skip SetTarget if the TRV reported this target within 15 min
 from .shelly_ble import (
     BTHomeData,
     ShellyBluTrvBleClient,
@@ -70,16 +71,48 @@ SHORT_AUTH_RETRY_INTERVAL = 300  # 5 minutes
 # connections caused proxy overload (20 s timeouts, cascading retries).
 # 3 polls × ~3 s each = ~9 s total, well within the 5-min poll interval.
 PROXY_SLOTS = 1
-_proxy_semaphores: dict[str, asyncio.Semaphore] = {}
-_fallback_semaphore = asyncio.Semaphore(1)  # conservative when proxy is unknown
+
+# Minimum gap between releasing a proxy slot and the next connection through
+# that proxy.  Back-to-back connections (e.g. automations firing setTarget +
+# ext temp for every TRV at :00) left the ESP32 still tearing down the previous
+# link ("OPEN_EVT in unexpected state", "Timeout waiting for teardown"); an
+# encryption interrupted that way preceded every permanent bond loss.
+PROXY_COOLDOWN = 3.0  # seconds
 
 
-def _get_proxy_semaphore(proxy_source: str | None) -> asyncio.Semaphore:
+class _ProxySemaphore(asyncio.Semaphore):
+    """Semaphore that enforces PROXY_COOLDOWN between consecutive holders."""
+
+    def __init__(self, value: int) -> None:
+        super().__init__(value)
+        self._released_at: float = 0
+
+    async def acquire(self) -> bool:
+        await super().acquire()
+        try:
+            wait = self._released_at + PROXY_COOLDOWN - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+        except BaseException:
+            super().release()
+            raise
+        return True
+
+    def release(self) -> None:
+        self._released_at = time.monotonic()
+        super().release()
+
+
+_proxy_semaphores: dict[str, _ProxySemaphore] = {}
+_fallback_semaphore = _ProxySemaphore(1)  # conservative when proxy is unknown
+
+
+def _get_proxy_semaphore(proxy_source: str | None) -> _ProxySemaphore:
     """Return the semaphore for *proxy_source*, creating it on first use."""
     if proxy_source is None:
         return _fallback_semaphore
     if proxy_source not in _proxy_semaphores:
-        _proxy_semaphores[proxy_source] = asyncio.Semaphore(PROXY_SLOTS)
+        _proxy_semaphores[proxy_source] = _ProxySemaphore(PROXY_SLOTS)
     return _proxy_semaphores[proxy_source]
 
 
@@ -168,6 +201,10 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         self._preferred_proxy: str | None = preferred_proxy
         self._last_ext_temp_sent: float | None = None
         self._last_ext_temp_time: float = 0
+        # Target as last reported by the TRV itself (poll, advertisement or
+        # verified set) — never the optimistic UI fallback in climate.py.
+        self._confirmed_target: float | None = None
+        self._confirmed_target_at: float = 0
         self._auth_failed_at: float = 0  # epoch time of last auth failure; 0 = never
         self._auth_retry_interval: int = AUTH_RETRY_INTERVAL  # set per failure
         self._bond_failure_notified: bool = False  # True after HA notification sent
@@ -299,6 +336,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                             old.current_C = status.current_C
                         if status.target_C is not None:
                             old.target_C = status.target_C
+                            self._record_confirmed_target(status.target_C)
                         if status.steps is not None:
                             old.steps = status.steps
                         old.not_calibrated = status.not_calibrated
@@ -465,6 +503,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                 old.battery = bthome.battery
             if bthome.target_temperature is not None:
                 old.target_temperature = bthome.target_temperature
+                self._record_confirmed_target(bthome.target_temperature)
             if bthome.current_temperature is not None:
                 old.current_temperature = bthome.current_temperature
             if bthome.external_temperature is not None:
@@ -734,6 +773,11 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
             self.ble_device = fresh
             self._client.set_ble_device(fresh)
 
+    def _record_confirmed_target(self, target_c: float) -> None:
+        """Remember a target value reported by the TRV itself."""
+        self._confirmed_target = target_c
+        self._confirmed_target_at = time.time()
+
     async def async_set_target_verified(
         self,
         target_c: float,
@@ -748,6 +792,19 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
 
         Returns True if verified, False if all attempts failed.
         """
+        if (
+            self._confirmed_target is not None
+            and abs(self._confirmed_target - target_c) < 0.1
+            and time.time() - self._confirmed_target_at < TARGET_CONFIRM_MAX_AGE
+        ):
+            _LOGGER.debug(
+                "Target %.1f°C already set on %s (reported %.0fs ago), skipping BLE",
+                target_c,
+                self.device_name,
+                time.time() - self._confirmed_target_at,
+            )
+            return True
+
         if self._auth_failed_at and (time.time() - self._auth_failed_at) < self._auth_retry_interval:
             _LOGGER.warning(
                 "Cannot set target temperature for %s: "
@@ -818,6 +875,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                             # Update state with verified values
                             self.state.status.target_C = status.target_C
                             self.state.bthome.target_temperature = status.target_C
+                            self._record_confirmed_target(status.target_C)
                             if status.pos is not None:
                                 self.state.status.pos = status.pos
                             if status.current_C is not None:
