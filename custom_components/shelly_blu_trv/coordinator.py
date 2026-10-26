@@ -173,6 +173,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         model: str | None = None,
         firmware: str | None = None,
         preferred_proxy: str | None = None,
+        config_entry_id: str | None = None,
     ) -> None:
         """Initialize the coordinator."""
         super().__init__(
@@ -187,6 +188,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
 
         self.ble_device = ble_device
         self.device_name = device_name
+        self.config_entry_id = config_entry_id
         self.base_unique_id = address.replace(":", "").lower()
 
         self.state = ShellyBluTrvState()
@@ -262,6 +264,12 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         """Determine if we need to poll the device for full status."""
         if self._probe_in_progress:
             return False  # don't race with the startup probe for _device_lock
+        if time.time() - self._last_poll_time < POLL_INTERVAL:
+            # A poll already started (possibly still waiting for the proxy).
+            # The base class only records poll time when a poll finishes, so
+            # advertisements arriving mid-poll would otherwise queue a second
+            # poll that its debouncer runs ~10 s later.
+            return False
         if seconds_since_last_poll is None:
             return True
         return seconds_since_last_poll >= POLL_INTERVAL
@@ -459,9 +467,14 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
                     )
                     self.state.firmware = fw
                     dr = dr_async_get(self.hass)
-                    dev = dr.async_get_device(
-                        connections={(CONNECTION_BLUETOOTH, self.state.mac)}
-                    )
+                    connection = (CONNECTION_BLUETOOTH, self.state.mac)
+                    if self.config_entry_id and hasattr(dr, "async_get_device_by_connection"):
+                        dev = dr.async_get_device_by_connection(
+                            connection, self.config_entry_id
+                        )
+                    else:
+                        # HA before 2026.x has no per-config-entry lookup
+                        dev = dr.async_get_device(connections={connection})
                     if dev:
                         dr.async_update_device(dev.id, sw_version=fw)
 

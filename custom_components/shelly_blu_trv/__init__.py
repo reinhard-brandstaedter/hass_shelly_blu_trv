@@ -75,6 +75,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         model=model,
         firmware=firmware,
         preferred_proxy=preferred_proxy,
+        config_entry_id=entry.entry_id,
     )
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
