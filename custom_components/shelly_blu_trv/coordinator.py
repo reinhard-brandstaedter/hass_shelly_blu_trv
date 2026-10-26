@@ -272,6 +272,8 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
     ) -> None:
         """Poll the device for full status via RPC."""
         _LOGGER.debug("Polling %s for full status", self.device_name)
+        # Lets the fallback timer skip when an advertisement-triggered poll ran recently
+        self._last_poll_time = time.time()
 
         # Update BLE device reference — but only when no preferred proxy is
         # configured.  service_info.device reflects whichever proxy triggered
