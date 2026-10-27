@@ -251,6 +251,7 @@ class ShellyBluTrvBleClient:
         self._connected = False
         self._mtu: int = 20  # Conservative default, will negotiate higher
         self._source_hint: str | None = None  # Set by coordinator before each connect
+        self._connected_source: str | None = None  # Proxy HA actually connected via
         self._rssi: int | None = None  # Last advertisement RSSI from coordinator
         self._pair_attempted = False  # pair() tried on the current connection
         self._last_pair_failed = False  # pair() failed on the current connection
@@ -291,7 +292,16 @@ class ShellyBluTrvBleClient:
 
     def _proxy_source(self) -> str:
         """Return the proxy source for log messages."""
-        return self._source_hint or "?"
+        return self._connected_source or self._source_hint or "?"
+
+    def _client_scanner_source(self) -> str | None:
+        """Return the source of the proxy HA actually connected through.
+
+        HaBleakClientWrapper keeps the scanner it connected via in the private
+        _connected_scanner attribute; None if it is missing (other HA versions).
+        """
+        scanner = getattr(self._client, "_connected_scanner", None)
+        return getattr(scanner, "source", None)
 
     async def connect(self) -> None:
         """Establish BLE connection."""
@@ -307,6 +317,7 @@ class ShellyBluTrvBleClient:
             )
             self._connected = False
             self._client = None
+            self._connected_source = None
 
         _LOGGER.debug("Connecting to %s via %s", self._address, self._proxy_source())
 
@@ -323,14 +334,12 @@ class ShellyBluTrvBleClient:
                 f"but proxy hint is {self._source_hint} — refusing wrong-proxy connection"
             )
 
-        # Create a pinned copy of the BLEDevice with the details dict
-        # snapshotted.  HA's BT stack mutates BLEDevice.details in-place as
-        # new advertisements arrive (e.g. tempsensor-wz overtakes bt-proxy-3
-        # as the "best" scanner mid-connection).  bleak-retry-connector calls
-        # ble_device_callback on its internal retry, which would return the
-        # mutated object with the wrong source.  A copy with a frozen details
-        # dict prevents this.  We also pin "source" to self._source_hint so
-        # that the copy is always correct even if other detail fields change.
+        # Create a copy of the BLEDevice with the details dict snapshotted and
+        # "source" set to self._source_hint.  HA's BT stack mutates
+        # BLEDevice.details in-place as new advertisements arrive.  This does
+        # NOT pin the proxy: HA's BleakClient wrapper picks the scanner with the
+        # best connection score and ignores details["source"], so the actual
+        # proxy is checked after connecting (below).
         _details = dict(self._ble_device.details) if isinstance(self._ble_device.details, dict) else self._ble_device.details
         if self._source_hint and isinstance(_details, dict):
             _details["source"] = self._source_hint
@@ -349,6 +358,29 @@ class ShellyBluTrvBleClient:
         self._connected = True
         self._pair_attempted = False
         self._last_pair_failed = False
+        self._connected_source = self._client_scanner_source()
+
+        # HA may have routed the connection through another proxy (e.g.
+        # tempsensor-wz when its RSSI beats bt-proxy-3).  The TRV has no bond
+        # with it, so drop the link before any write or pair() can happen.
+        if (
+            self._source_hint
+            and self._connected_source
+            and self._connected_source != self._source_hint
+        ):
+            wrong_source = self._connected_source
+            _LOGGER.warning(
+                "HA connected to %s via %s instead of preferred proxy %s - "
+                "disconnecting before any write",
+                self._address,
+                wrong_source,
+                self._source_hint,
+            )
+            await self.disconnect()
+            raise ConnectionError(
+                f"Connection to {self._address} went via {wrong_source} "
+                f"instead of preferred proxy {self._source_hint}"
+            )
 
         # Get negotiated MTU (minus 3 bytes for ATT header)
         self._mtu = min(self._client.mtu_size - 3, 512) if self._client.mtu_size else 20
@@ -386,6 +418,7 @@ class ShellyBluTrvBleClient:
             finally:
                 self._connected = False
                 self._client = None
+                self._connected_source = None
 
     async def async_rpc_call(
         self,
