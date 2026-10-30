@@ -16,6 +16,7 @@ from typing import Any
 
 from bleak import BleakClient
 from bleak.backends.device import BLEDevice
+from bleak.exc import BleakError
 from bleak_retry_connector import establish_connection
 
 from .const import (
@@ -50,6 +51,54 @@ MAX_TRANSIENT_PAIR_FAILURES = 3
 
 # RPC request ID counter
 _rpc_id_counter = 0
+
+
+_pinned_client_classes: dict[str, type[BleakClient]] = {}
+
+
+def _pinned_client_class(source: str) -> type[BleakClient]:
+    """Return a BleakClient class that only connects via proxy *source*.
+
+    HA replaces bleak.BleakClient with HaBleakClientWrapper, which picks the
+    scanner with the best RSSI/connection score and ignores
+    BLEDevice.details["source"].  The subclass overrides that (private)
+    selection so the connection is only ever made through *source*, where
+    the TRV's bond lives.  Falls back to the plain class if the wrapper's
+    internals are missing; the post-connect check in connect() still guards.
+    """
+    if not hasattr(BleakClient, "_async_get_best_available_backend_and_device"):
+        return BleakClient
+    if (cls := _pinned_client_classes.get(source)) is not None:
+        return cls
+
+    class _PinnedBleakClient(BleakClient):  # type: ignore[misc,valid-type]
+        def __init__(self, address_or_ble_device: Any, *args: Any, **kwargs: Any) -> None:
+            super().__init__(address_or_ble_device, *args, **kwargs)
+            self._pinned_address = (
+                address_or_ble_device.address
+                if isinstance(address_or_ble_device, BLEDevice)
+                else str(address_or_ble_device)
+            )
+
+        def _async_get_best_available_backend_and_device(self, manager: Any) -> Any:
+            for device in manager.async_scanner_devices_by_address(self._pinned_address, True):
+                if device.scanner.source != source:
+                    continue
+                if backend := self._async_get_backend_for_ble_device(
+                    manager, device.scanner, device.ble_device
+                ):
+                    return backend
+                raise BleakError(
+                    f"Preferred proxy {source} has no free connection slot "
+                    f"for {self._pinned_address}"
+                )
+            raise BleakError(
+                f"Preferred proxy {source} has no recent advertisement "
+                f"from {self._pinned_address}"
+            )
+
+    _pinned_client_classes[source] = _PinnedBleakClient
+    return _PinnedBleakClient
 
 
 def _next_rpc_id() -> int:
@@ -336,10 +385,10 @@ class ShellyBluTrvBleClient:
 
         # Create a copy of the BLEDevice with the details dict snapshotted and
         # "source" set to self._source_hint.  HA's BT stack mutates
-        # BLEDevice.details in-place as new advertisements arrive.  This does
-        # NOT pin the proxy: HA's BleakClient wrapper picks the scanner with the
-        # best connection score and ignores details["source"], so the actual
-        # proxy is checked after connecting (below).
+        # BLEDevice.details in-place as new advertisements arrive.  The copy
+        # alone does NOT pin the proxy (HA's wrapper ignores details["source"]);
+        # _pinned_client_class() does, and the actual proxy is still checked
+        # after connecting (below) in case the pinning is unavailable.
         _details = dict(self._ble_device.details) if isinstance(self._ble_device.details, dict) else self._ble_device.details
         if self._source_hint and isinstance(_details, dict):
             _details["source"] = self._source_hint
@@ -349,7 +398,7 @@ class ShellyBluTrvBleClient:
             _details,
         )
         self._client = await establish_connection(
-            BleakClient,
+            _pinned_client_class(self._source_hint) if self._source_hint else BleakClient,
             _device,
             self._address,
             max_attempts=1,
