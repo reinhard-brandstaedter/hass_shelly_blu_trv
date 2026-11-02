@@ -107,6 +107,24 @@ _proxy_semaphores: dict[str, _ProxySemaphore] = {}
 _fallback_semaphore = _ProxySemaphore(1)  # conservative when proxy is unknown
 
 
+def _consume_task_result(task: asyncio.Task[Any]) -> None:
+    """Retrieve a finished task's exception so an abandoned task doesn't log it."""
+    if not task.cancelled():
+        task.exception()
+
+
+def _start_task(coro: Any) -> asyncio.Task[Any]:
+    """Start *coro* as a task whose result may be abandoned by its caller."""
+    task = asyncio.ensure_future(coro)
+    task.add_done_callback(_consume_task_result)
+    return task
+
+
+async def _shielded(coro: Any) -> Any:
+    """Run *coro* to completion even if the awaiting caller is cancelled."""
+    return await asyncio.shield(_start_task(coro))
+
+
 def _get_proxy_semaphore(proxy_source: str | None) -> _ProxySemaphore:
     """Return the semaphore for *proxy_source*, creating it on first use."""
     if proxy_source is None:
@@ -214,6 +232,8 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         # blocking polls from firing before the probe has had a chance to run.
         # Set back to False in async_startup_probe() finally block.
         self._poll_timer_unsub: callback | None = None  # cancels the fallback timer
+        # (target, task) of the SetTarget currently in flight, for coalescing
+        self._set_target_inflight: tuple[float, asyncio.Task[bool]] | None = None
 
     @property
     def client(self) -> ShellyBluTrvBleClient:
@@ -274,7 +294,57 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
             return True
         return seconds_since_last_poll >= POLL_INTERVAL
 
+    # --- Cancellation-safe entry points ---
+    #
+    # A BLE transaction (connect, write, read, disconnect) must never be cut
+    # off half-way: a caller cancelled mid-write (e.g. a re-triggered
+    # automation) used to leave an unencrypted link open on the proxy, and
+    # the next connection on top of it cost WZ2 its bond (2026-10-31 23:00).
+    # Each entry point therefore runs its work in a task the caller's
+    # cancellation cannot reach; the caller stops waiting, the task finishes.
+
     async def _async_update(
+        self,
+        service_info: BluetoothServiceInfoBleak | None,
+    ) -> None:
+        """Poll the device for full status via RPC (cancellation-safe)."""
+        await _shielded(self._async_update_impl(service_info))
+
+    async def async_startup_probe(self) -> None:
+        """Run the startup probe (cancellation-safe)."""
+        await _shielded(self._async_startup_probe_impl())
+
+    async def async_set_target_verified(
+        self,
+        target_c: float,
+        verify_delay: float = 2.0,
+    ) -> bool:
+        """Set and verify the target temperature (cancellation-safe).
+
+        An identical request already in flight is joined instead of opening
+        a second connection to the TRV.
+        """
+        inflight = self._set_target_inflight
+        if inflight is not None and not inflight[1].done() and abs(inflight[0] - target_c) < 0.1:
+            _LOGGER.debug(
+                "Set target %.1f°C for %s already in progress, waiting for it",
+                target_c,
+                self.device_name,
+            )
+            return await asyncio.shield(inflight[1])
+        task = _start_task(self._async_set_target_verified_impl(target_c, verify_delay))
+        self._set_target_inflight = (target_c, task)
+        return await asyncio.shield(task)
+
+    async def async_rpc_command(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        """Execute an RPC command with retries (cancellation-safe)."""
+        return await _shielded(self._async_rpc_command_impl(method, params))
+
+    async def _async_update_impl(
         self,
         service_info: BluetoothServiceInfoBleak | None,
     ) -> None:
@@ -618,7 +688,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         await self._async_update(None)
         self.async_update_listeners()
 
-    async def async_startup_probe(self) -> None:
+    async def _async_startup_probe_impl(self) -> None:
         """Attempt a single BLE connection immediately after setup.
 
         Gives the TRV a chance to complete bonding within its 30-second pairing
@@ -793,7 +863,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
         self._confirmed_target = target_c
         self._confirmed_target_at = time.time()
 
-    async def async_set_target_verified(
+    async def _async_set_target_verified_impl(
         self,
         target_c: float,
         verify_delay: float = 2.0,
@@ -1027,7 +1097,7 @@ class ShellyBluTrvCoordinator(ActiveBluetoothDataUpdateCoordinator):
             self._last_ext_temp_sent = prev_sent
             self._last_ext_temp_time = 0  # don't rate-limit the retry
 
-    async def async_rpc_command(
+    async def _async_rpc_command_impl(
         self,
         method: str,
         params: dict[str, Any] | None = None,

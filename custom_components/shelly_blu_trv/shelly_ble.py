@@ -49,6 +49,10 @@ PAIR_RETRY_DELAY = 1.0
 # transient on a TRV whose link was secured earlier in this session.
 MAX_TRANSIENT_PAIR_FAILURES = 3
 
+# A connect via a BT proxy faster than this (seconds) is implausible and
+# suggests the proxy reused a link that was still open.
+SUSPICIOUS_CONNECT_TIME = 0.5
+
 # RPC request ID counter
 _rpc_id_counter = 0
 
@@ -357,13 +361,20 @@ class ShellyBluTrvBleClient:
         if self._connected and self._client:
             if self._client.is_connected:
                 return
-            # Connection was silently dropped by the peripheral; reset state
-            # so we fall through to establish_connection below.
+            # Connection was silently dropped by the peripheral or left over
+            # from an aborted transaction.  Close it properly so the proxy
+            # doesn't keep a half-open link to the TRV, then reconnect.
             _LOGGER.debug(
                 "Stale BLE connection detected for %s via %s, reconnecting",
                 self._address,
                 self._proxy_source(),
             )
+            try:
+                await asyncio.wait_for(self._client.disconnect(), timeout=10.0)
+            except (asyncio.TimeoutError, Exception):
+                _LOGGER.debug(
+                    "Error closing stale connection to %s", self._address, exc_info=True
+                )
             self._connected = False
             self._client = None
             self._connected_source = None
@@ -397,6 +408,7 @@ class ShellyBluTrvBleClient:
             self._ble_device.name,
             _details,
         )
+        connect_started = time.monotonic()
         self._client = await establish_connection(
             _pinned_client_class(self._source_hint) if self._source_hint else BleakClient,
             _device,
@@ -404,7 +416,18 @@ class ShellyBluTrvBleClient:
             max_attempts=1,
             ble_device_callback=lambda: _device,
         )
+        connect_time = time.monotonic() - connect_started
         self._connected = True
+        if connect_time < SUSPICIOUS_CONNECT_TIME:
+            # A real connection through a proxy takes seconds; this fast the
+            # proxy most likely handed back a link that was still open.
+            _LOGGER.warning(
+                "Connection to %s via %s completed in %.0f ms - proxy may have "
+                "reused an existing link",
+                self._address,
+                self._client_scanner_source() or self._proxy_source(),
+                connect_time * 1000,
+            )
         self._pair_attempted = False
         self._last_pair_failed = False
         self._connected_source = self._client_scanner_source()
