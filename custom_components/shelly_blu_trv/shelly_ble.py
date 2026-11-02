@@ -49,10 +49,6 @@ PAIR_RETRY_DELAY = 1.0
 # transient on a TRV whose link was secured earlier in this session.
 MAX_TRANSIENT_PAIR_FAILURES = 3
 
-# A connect via a BT proxy faster than this (seconds) is implausible and
-# suggests the proxy reused a link that was still open.
-SUSPICIOUS_CONNECT_TIME = 0.5
-
 # RPC request ID counter
 _rpc_id_counter = 0
 
@@ -418,16 +414,6 @@ class ShellyBluTrvBleClient:
         )
         connect_time = time.monotonic() - connect_started
         self._connected = True
-        if connect_time < SUSPICIOUS_CONNECT_TIME:
-            # A real connection through a proxy takes seconds; this fast the
-            # proxy most likely handed back a link that was still open.
-            _LOGGER.warning(
-                "Connection to %s via %s completed in %.0f ms - proxy may have "
-                "reused an existing link",
-                self._address,
-                self._client_scanner_source() or self._proxy_source(),
-                connect_time * 1000,
-            )
         self._pair_attempted = False
         self._last_pair_failed = False
         self._connected_source = self._client_scanner_source()
@@ -458,11 +444,12 @@ class ShellyBluTrvBleClient:
         self._mtu = min(self._client.mtu_size - 3, 512) if self._client.mtu_size else 20
 
         _LOGGER.debug(
-            "Connected to %s via %s, MTU: %d, RSSI: %s dBm",
+            "Connected to %s via %s, MTU: %d, RSSI: %s dBm, connect: %.0f ms",
             self._address,
             self._proxy_source(),
             self._mtu,
             self._rssi if self._rssi is not None else "?",
+            connect_time * 1000,
         )
 
         # Verify the RPC characteristics are present in the GATT table.
